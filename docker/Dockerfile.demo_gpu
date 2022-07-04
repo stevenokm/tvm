@@ -18,12 +18,15 @@
 # Minimum docker image for demo purposes
 # CI docker GPU env
 # tag: v0.54
-FROM tlcpack/ci-gpu:v0.55
+FROM tvm.ci_gpu:latest
 
 COPY utils/apt-install-and-clear.sh /usr/local/bin/apt-install-and-clear
 
 # Jupyter notebook.
 RUN pip3 install matplotlib Image "Pillow<7" jupyter[notebook]
+
+# Deep learning frameworks
+RUN pip3 install mxnet tensorflow keras gluoncv dgl
 
 # Build TVM
 COPY install/install_tvm_gpu.sh /install/install_tvm_gpu.sh

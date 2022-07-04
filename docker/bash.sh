@@ -282,7 +282,7 @@ fi
 
 source "$(dirname $0)/dev_common.sh" || exit 2
 
-DOCKER_FLAGS=( )
+DOCKER_FLAGS=( --privileged )
 DOCKER_MOUNT=( )
 DOCKER_DEVICES=( )
 

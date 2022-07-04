@@ -34,17 +34,26 @@ RUN bash /install/ubuntu1804_install_python.sh
 # Globally disable pip cache
 RUN pip config set global.no-cache-dir false
 
-COPY install/ubuntu_install_python_package.sh /install/ubuntu_install_python_package.sh
-RUN bash /install/ubuntu_install_python_package.sh
+COPY install/ubuntu_install_cmake_source.sh /install/ubuntu_install_cmake_source.sh
+RUN bash /install/ubuntu_install_cmake_source.sh
 
 COPY install/ubuntu1804_install_llvm.sh /install/ubuntu1804_install_llvm.sh
 RUN bash /install/ubuntu1804_install_llvm.sh
 
-COPY install/ubuntu_install_dnnl.sh /install/ubuntu_install_dnnl.sh
-RUN bash /install/ubuntu_install_dnnl.sh
+COPY install/ubuntu_install_python_package.sh /install/ubuntu_install_python_package.sh
+RUN bash /install/ubuntu_install_python_package.sh
 
-COPY install/ubuntu_install_papi.sh /install/ubuntu_install_papi.sh
-RUN bash /install/ubuntu_install_papi.sh ""
+COPY install/ubuntu_install_sphinx.sh /install/ubuntu_install_sphinx.sh
+RUN bash /install/ubuntu_install_sphinx.sh
+
+# Enable doxygen for c++ doc build
+RUN apt-get update && apt-install-and-clear -y doxygen libprotobuf-dev protobuf-compiler
+
+COPY install/ubuntu_install_java.sh /install/ubuntu_install_java.sh
+RUN bash /install/ubuntu_install_java.sh
+
+COPY install/ubuntu_install_nodejs.sh /install/ubuntu_install_nodejs.sh
+RUN bash /install/ubuntu_install_nodejs.sh
 
 # Install MxNet for access to Gluon Model Zoo.
 COPY install/ubuntu_install_mxnet.sh /install/ubuntu_install_mxnet.sh
@@ -81,6 +90,10 @@ RUN bash /install/ubuntu_install_java.sh
 # BYODT deps
 COPY install/ubuntu_install_universal.sh /install/ubuntu_install_universal.sh
 RUN bash /install/ubuntu_install_universal.sh
+
+# PAPI profiling deps
+COPY install/ubuntu_install_papi.sh /install/ubuntu_install_papi.sh
+RUN bash /install/ubuntu_install_papi.sh ""
 
 # Chisel deps for TSIM
 COPY install/ubuntu_install_sbt.sh /install/ubuntu_install_sbt.sh
@@ -149,6 +162,15 @@ COPY install/ubuntu_install_sccache.sh /install/ubuntu_install_sccache.sh
 RUN bash /install/ubuntu_install_sccache.sh
 ENV PATH /opt/sccache:$PATH
 
+# dnnl
+COPY install/ubuntu_install_dnnl.sh /install/ubuntu_install_dnnl.sh
+RUN bash /install/ubuntu_install_dnnl.sh
+
 # Libxsmm deps
 COPY install/ubuntu_install_libxsmm.sh /install
 RUN bash /install/ubuntu_install_libxsmm.sh
+
+# Ensure the local libcuda have higher priority than the /usr/local/cuda/compact
+# since the compact libcuda does not work on non-Tesla gpus
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/:${LD_LIBRARY_PATH}
+ENV PATH=/node_modules/.bin:${PATH}
