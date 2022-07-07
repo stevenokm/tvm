@@ -24,7 +24,11 @@ cd /usr
 git clone https://github.com/stevenokm/tvm.git tvm --recursive
 cd /usr/tvm
 # checkout a hash-tag
-git checkout v0.9.0
+# git checkout 4b13bf668edc7099b38d463e5db94ebc96c80470
+# checkout v0.8, sucess on sclab-148
+git checkout v0.8
+
+sed -i.bak 's/PAPI_FP_OPS/PAPI_SP_OPS/g' ./tests/python/unittest/test_runtime_profiling.py
 
 echo set\(USE_LLVM llvm-config-10\) >> config.cmake
 echo set\(USE_CUDA ON\) >> config.cmake

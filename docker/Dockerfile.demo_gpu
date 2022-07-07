@@ -18,7 +18,7 @@
 # Minimum docker image for demo purposes
 # CI docker GPU env
 # tag: v0.54
-FROM tvm.ci_gpu:latest
+FROM tvm.ci_gpu:v0.9.0
 
 COPY utils/apt-install-and-clear.sh /usr/local/bin/apt-install-and-clear
 

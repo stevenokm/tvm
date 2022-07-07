@@ -1,0 +1,4 @@
+FROM tvm.demo_gpu:v0.8
+
+# once-for-all dependencies
+RUN pip3 install ofa
