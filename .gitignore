@@ -271,3 +271,4 @@ gallery/how_to/work_with_microtvm/micro_tvmc.py
 
 # project folder
 project/
+.torch/
