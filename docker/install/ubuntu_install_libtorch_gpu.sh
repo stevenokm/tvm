@@ -20,25 +20,8 @@ set -e
 set -u
 set -o pipefail
 
-cd /usr
-git clone https://github.com/stevenokm/tvm.git tvm --recursive
-cd /usr/tvm
-# checkout a hash-tag
-# git checkout 4b13bf668edc7099b38d463e5db94ebc96c80470
-# checkout v0.8, sucess on sclab-148
-git checkout v0.8
-
-echo set\(USE_LLVM llvm-config-10\) >> config.cmake
-echo set\(USE_CUDA ON\) >> config.cmake
-echo set\(USE_CUDNN ON\) >> config.cmake
-echo set\(USE_BLAS openblas\) >> config.cmake
-echo set\(USE_PAPI ON\) >> config.cmake
-echo set\(USE_RPC ON\) >> config.cmake
-echo set\(USE_GRAPH_EXECUTOR ON\) >> config.cmake
-echo set\(USE_PROFILER ON\) >> config.cmake
-echo set\(USE_RANDOM ON\) >> config.cmake
-echo set\(USE_SORT ON\) >> config.cmake
-mkdir -p build
-cd build
-cmake ..
-make -j10
+pushd /usr/local/
+wget -q https://download.pytorch.org/libtorch/lts/1.8/cu102/libtorch-cxx11-abi-shared-with-deps-1.8.2%2Bcu102.zip
+unzip libtorch-cxx11-abi-shared-with-deps-1.8.2+cu102.zip
+# now it is in /usr/local/libtorch
+popd

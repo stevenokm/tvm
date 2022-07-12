@@ -18,7 +18,7 @@
 # Minimum docker image for demo purposes
 # CI docker GPU env
 # tag: v0.54
-FROM tvm.ci_gpu:v0.9.0_torch182
+FROM tvm.ci_gpu:sclab
 
 COPY utils/apt-install-and-clear.sh /usr/local/bin/apt-install-and-clear
 
@@ -31,6 +31,8 @@ RUN pip3 install mxnet tensorflow keras gluoncv dgl
 # Build TVM
 COPY install/install_tvm_gpu.sh /install/install_tvm_gpu.sh
 RUN bash /install/install_tvm_gpu.sh
+
+RUN sed -i.bak 's/PAPI_FP_OPS/PAPI_SP_OPS/g' /usr/tvm/tests/python/unittest/test_runtime_profiling.py
 
 # Environment variables
 ENV PYTHONPATH=/usr/tvm/python:/usr/tvm/vta/python:${PYTHONPATH}

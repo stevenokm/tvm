@@ -282,8 +282,8 @@ fi
 
 source "$(dirname $0)/dev_common.sh" || exit 2
 
-DOCKER_FLAGS=( --privileged )
-DOCKER_MOUNT=( )
+DOCKER_FLAGS=( --privileged --shm-size=16gb )
+DOCKER_MOUNT=( --volume "/ssd1:/ssd1" )
 DOCKER_DEVICES=( )
 
 

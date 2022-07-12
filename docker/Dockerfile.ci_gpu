@@ -84,11 +84,11 @@ RUN bash /install/ubuntu_install_tensorflow.sh
 COPY install/ubuntu_install_darknet.sh /install/ubuntu_install_darknet.sh
 RUN bash /install/ubuntu_install_darknet.sh
 
-COPY install/ubuntu_install_onnx.sh /install/ubuntu_install_onnx.sh
-RUN bash /install/ubuntu_install_onnx.sh
+COPY install/ubuntu_install_onnx_gpu.sh /install/ubuntu_install_onnx_gpu.sh
+RUN bash /install/ubuntu_install_onnx_gpu.sh
 
-COPY install/ubuntu_install_libtorch.sh /install/ubuntu_install_libtorch.sh
-RUN bash /install/ubuntu_install_libtorch.sh
+COPY install/ubuntu_install_libtorch_gpu.sh /install/ubuntu_install_libtorch_gpu.sh
+RUN bash /install/ubuntu_install_libtorch_gpu.sh
 
 COPY install/ubuntu_install_tflite.sh /install/ubuntu_install_tflite.sh
 RUN bash /install/ubuntu_install_tflite.sh

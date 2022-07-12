@@ -1,4 +1,6 @@
-FROM tvm.demo_gpu:v0.9.0_torch182
+FROM tvm.demo_gpu:sclab
 
 # once-for-all dependencies
 RUN pip3 install ofa
+
+RUN sed -i.bak 's/\/dataset\/imagenet/\/ssd1\/ILSVRC/g' /usr/local/lib/python3.7/dist-packages/ofa/imagenet_classification/data_providers/imagenet.py
