@@ -27,6 +27,7 @@
 
 #include <algorithm>
 
+#include "constraint_extract.h"
 #include "int_operator.h"
 #include "pattern_match.h"
 
@@ -176,6 +177,8 @@ class ConstIntBoundAnalyzer::Impl
     return Union(a, b);
   }
 
+  Entry VisitExpr_(const BroadcastNode* op) final { return VisitExpr(op->value); }
+
   Entry VisitExpr_(const CastNode* op) final {
     Entry a;
 
@@ -190,6 +193,31 @@ class ConstIntBoundAnalyzer::Impl
 
     Entry b = Everything(op->dtype);
     return Intersect(a, b);
+  }
+
+  /*!
+   * \brief Process the divisor by making assumption that divide by zero
+   * won't happen in a valid program.
+   *
+   * This is important for us to get a lot of symbolic shape bound right
+   * now that the shape n >= 0, but in cases
+   * when mod or divide of n occur, the intention is actually n > 0
+   *
+   * \param divisor The input divsor entry
+   * \return The processed entry
+   */
+  Entry AssumeNoZeroDivisor(Entry divisor) {
+    ICHECK(!divisor.is_const(0)) << "Find divide by zero";
+    // NOTE: here we make the assumption that
+    // divide by zero won't happen in a valid program
+    // this is important for us to get a lot of symbolic shape bound right
+    // where most conditions know that the shape n >= 0, but in cases
+    // when mod or divide of n occur, the intention is actually n > 0
+    if (divisor.min_value == 0) {
+      divisor.min_value = 1;
+      ICHECK_GE(divisor.max_value, 1);
+    }
+    return divisor;
   }
 
   Entry VisitExpr_(const IntImmNode* op) final { return MakeBound(op->value, op->value); }
@@ -220,14 +248,14 @@ class ConstIntBoundAnalyzer::Impl
 
   Entry VisitExpr_(const DivNode* op) final {
     Entry a = VisitExpr(op->a);
-    Entry b = VisitExpr(op->b);
-    ICHECK(!b.is_const(0)) << "divide by zero";
+    Entry b = AssumeNoZeroDivisor(VisitExpr(op->b));
     return HandleDivision(a, b, op->dtype, InfAwareDiv);
   }
 
   Entry VisitExpr_(const ModNode* op) final {
     Entry a = VisitExpr(op->a);
-    Entry b = VisitExpr(op->b);
+    Entry b = AssumeNoZeroDivisor(VisitExpr(op->b));
+
     if (b.min_value > 0) {
       int64_t b_max_cap = InfAwareAdd(b.max_value, -1);
       if (a.min_value >= 0) {
@@ -249,8 +277,7 @@ class ConstIntBoundAnalyzer::Impl
 
   Entry VisitExpr_(const FloorDivNode* op) final {
     Entry a = VisitExpr(op->a);
-    Entry b = VisitExpr(op->b);
-    ICHECK(!b.is_const(0)) << "floordiv by zero";
+    Entry b = AssumeNoZeroDivisor(VisitExpr(op->b));
     return HandleDivision(a, b, op->dtype, InfAwareFloorDiv);
   }
 
@@ -273,7 +300,8 @@ class ConstIntBoundAnalyzer::Impl
      * That is, min(0, b_min + 1) <= floormod(a, b) <= max(0, b_max - 1)
      */
     Entry a = VisitExpr(op->a);
-    Entry b = VisitExpr(op->b);
+    Entry b = AssumeNoZeroDivisor(VisitExpr(op->b));
+
     if (b.min_value > 0) {
       int64_t b_max_cap = InfAwareAdd(b.max_value, -1);
       if (a.min_value >= 0) {
@@ -454,7 +482,6 @@ class ConstIntBoundAnalyzer::Impl
     // at a negative value and ends at a positive one, narrow it down to
     // be closer to 0, because BinaryOpBoundary only checks end-points of
     // the domain ranges.
-
     // If the range of b contains 0, then some infinity will be involved
     if (b.min_value <= 0 && 0 <= b.max_value && dt.is_int()) {
       Entry b_neg = b.min_value < 0 ? MakeBound(b.min_value, -1) : Everything(dt);
@@ -637,36 +664,34 @@ class ConstIntBoundAnalyzer::Impl
   static std::vector<BoundInfo> DetectBoundInfo(const PrimExpr& cond) {
     PVar<PrimExpr> x, y;
     PVar<IntImm> c;
-    if ((x && y).Match(cond)) {
-      auto ret1 = DetectBoundInfo(x.Eval());
-      auto ret2 = DetectBoundInfo(y.Eval());
-      ret1.insert(ret1.end(), ret2.begin(), ret2.end());
-      return ret1;
+
+    std::vector<BoundInfo> info;
+    auto add_info = [&](const PrimExpr& expr, int64_t min_value, int64_t max_value) {
+      // If the conditional is comparing two integers, do not assign a
+      // value to them.
+      if (!expr->IsInstance<IntImmNode>()) {
+        info.push_back(BoundInfo(expr, MakeBound(min_value, max_value)));
+      }
+    };
+
+    for (const auto& subexpr : ExtractConstraints(cond)) {
+      // NOTE: The canonical form always uses <= or <, but a
+      // user-supplied constraint from the python API might not be
+      // canonicalized.
+      if ((c <= x).Match(subexpr) || (x >= c).Match(subexpr)) {
+        add_info(x.Eval(), c.Eval()->value, kPosInf);
+      } else if ((c < x).Match(subexpr) || (x > c).Match(subexpr)) {
+        add_info(x.Eval(), c.Eval()->value + 1, kPosInf);
+      } else if ((x <= c).Match(subexpr) || (x >= c).Match(subexpr)) {
+        add_info(x.Eval(), kNegInf, c.Eval()->value);
+      } else if ((x < c).Match(subexpr) || (c > x).Match(subexpr)) {
+        add_info(x.Eval(), kNegInf, c.Eval()->value - 1);
+      } else if ((x == c).Match(subexpr) || (c == x).Match(subexpr)) {
+        add_info(x.Eval(), c.Eval()->value, c.Eval()->value);
+      }
     }
 
-    // NOTE: canonical form always use <= or <
-    Entry bound;
-    if ((c <= x).Match(cond)) {
-      bound = MakeBound(c.Eval()->value, kPosInf);
-    } else if ((c < x).Match(cond)) {
-      bound = MakeBound(c.Eval()->value + 1, kPosInf);
-    } else if ((x <= c).Match(cond)) {
-      bound = MakeBound(kNegInf, c.Eval()->value);
-    } else if ((x < c).Match(cond)) {
-      bound = MakeBound(kNegInf, c.Eval()->value - 1);
-    } else if ((x == c).Match(cond) || (c == x).Match(cond)) {
-      bound = MakeBound(c.Eval()->value, c.Eval()->value);
-    } else {
-      return {};
-    }
-
-    // If the conditional is comparing two integers, do not assign a
-    // value to them.
-    if (x.Eval().as<IntImmNode>()) {
-      return {};
-    }
-
-    return {BoundInfo(x.Eval(), bound)};
+    return info;
   }
 
   /*!

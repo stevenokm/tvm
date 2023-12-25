@@ -24,9 +24,9 @@
  * Codegen.
  */
 
-#include <tvm/ir/error.h>
 #include <tvm/relay/analysis.h>
 #include <tvm/relay/attrs/annotation.h>
+#include <tvm/relay/error.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/expr_functor.h>
 #include <tvm/relay/transform.h>
@@ -46,6 +46,8 @@ namespace tvm {
 namespace relay {
 namespace contrib {
 namespace ethosu {
+
+using FTVMTIRToRuntime = tvm::runtime::TypedPackedFunc<runtime::Module(IRModule, Target)>;
 
 /*!
  * \brief This mutator outlines functions that are marked with a named
@@ -191,7 +193,7 @@ class RemoveRedundantIdentities : public MixedModeMutator {
       }
 
       if (const auto* parent_callnode = current_arg.as<CallNode>()) {
-        if (const auto* parent_op = parent_callnode->op.as<OpNode>()) {
+        if (auto parent_op = parent_callnode->op.as<OpNode>()) {
           Call parent_call = GetRef<Call>(parent_callnode);
           if (parent_op->name == "contrib.ethosu.identity" && IdentityDoesNothing(parent_call) &&
               CheckIdentityBetweenTransformOperations(call, parent_call)) {
@@ -320,7 +322,7 @@ runtime::Module TIRToRuntime(IRModule mod, Target target) {
 
 TVM_REGISTER_TARGET_KIND("ethos-u", kDLCPU)
     .set_attr<Bool>("use_device_api", Bool(true))
-    .set_attr<FTVMRelayToTIR>(tvm::attr::kRelayToTIR, RelayToTIR())
+    .set_attr<relay::transform::FTVMRelayToTIR>(tvm::attr::kRelayToTIR, RelayToTIR())
     .set_attr<FTVMTIRToRuntime>("TIRToRuntime", TIRToRuntime);
 
 }  // namespace ethosu

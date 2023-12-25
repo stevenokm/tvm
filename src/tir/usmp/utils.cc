@@ -132,9 +132,9 @@ AllocatedPoolInfo::AllocatedPoolInfo(PoolInfo pool_info, Integer allocated_size,
 }
 
 TVM_REGISTER_NODE_TYPE(AllocatedPoolInfoNode);
-TVM_REGISTER_GLOBAL("tir.usmp.AllocatedPoolInfo")
-    .set_body_typed([](PoolInfo pool_info, Integer allocated_size) {
-      return AllocatedPoolInfo(pool_info, allocated_size);
+TVM_REGISTER_GLOBAL("ir.AllocatedPoolInfo")
+    .set_body_typed([](PoolInfo pool_info, Integer allocated_size, Integer pool_var_idx) {
+      return AllocatedPoolInfo(pool_info, allocated_size, pool_var_idx);
     });
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
@@ -228,14 +228,14 @@ class ModuleWorkspaceSizeCalculator : public StmtExprVisitor {
     Integer workspace_byte_alignment =
         tgt->GetAttr<Integer>("workspace-byte-alignment").value_or(16);
     Integer workspace_req = CalculateWorkspaceBytes(func, workspace_byte_alignment);
-    if (workspace_req) {
+    if (workspace_req.IntValue() != 0) {
       current_workspace_size_ += workspace_req->value;
     }
     if (max_workspace_size < current_workspace_size_) {
       max_workspace_size = current_workspace_size_;
     }
     this->VisitStmt(func->body);
-    if (workspace_req) {
+    if (workspace_req.IntValue() != 0) {
       current_workspace_size_ -= workspace_req->value;
     }
   }

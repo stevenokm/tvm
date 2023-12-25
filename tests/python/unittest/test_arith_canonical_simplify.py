@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 import tvm
+import tvm.testing
 from tvm import te
 
 
@@ -97,6 +98,8 @@ def test_split_index_simplify():
     # cannot simplify mixed case, unless we canonicalize into one mode.
     ck.verify(tdiv(x, 6) * 2 + tmod(fld(x, 3), 2), tdiv(x, 6) * 2 + tmod(fld(x, 3), 2))
 
+    ck.verify(tmod(-x, 2), tmod(x, -2) * -1)
+
 
 def test_div_simplify():
     ck = CanonicalChecker()
@@ -122,12 +125,30 @@ def test_div_simplify():
     ck.verify(fld(17 + 47 * x, 16), fld(x * 47 + 17, 16))
 
 
+def test_fp16_const_fold():
+    ck = CanonicalChecker()
+    zero = tvm.tir.const(0, "float16")
+    one = tvm.tir.const(1, "float16")
+    half = tvm.tir.const(0.5, "float16")
+
+    ck.verify(zero + half, half)
+    ck.verify(half - zero, half)
+
+    ck.verify(zero * half, zero)
+    ck.verify(half * one, half)
+
+    ck.verify(half / one, half)
+    ck.verify(zero / half, zero)
+
+
 def test_floormod_simplify():
     ck = CanonicalChecker()
     flm = tvm.te.floormod
     x, y = te.var("x"), te.var("y")
     ck.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y + 12, 16))
     ck.verify(flm(flm((x * 4), 16), 8), flm(x, 2) * 4)
+
+    ck.verify(flm(-x, 2), flm(x, -2) * -1)
 
 
 def test_canonical_mixed():
@@ -161,7 +182,7 @@ def test_reduce_combiner_simplify():
     )
     sum_and_prod = comm_reducer(
         lambda x, y: (x[0] + y[0], x[1] * y[1]),
-        lambda t0, t1: (tvm.tir.const(0, t0), tvm.tir.const(5, t0) - tvm.tir.const(4, t0)),
+        lambda t0, t1: (tvm.tir.const(0, t0), tvm.tir.const(5, t1) - tvm.tir.const(4, t1)),
     )
     some_reducer1 = comm_reducer(
         lambda x, y: (
@@ -351,15 +372,95 @@ def test_simplify_cast():
     ck.verify(res, 2)
 
 
-if __name__ == "__main__":
-    test_floormod_simplify()
-    test_mul_sum_simplify()
-    test_simplify_if_then_else()
-    test_div_simplify()
-    test_reduce_simplify()
-    test_reduce_combiner_simplify()
+def test_simplify_normalize_min_value_expr():
+    ck = CanonicalChecker()
+    x = te.var("x", "int32")
 
-    test_split_index_simplify()
-    test_canonical_mixed()
-    test_complex_cases()
-    test_simplify_cast()
+    ck.verify(te.min_value("int32") - x == 0, x == te.min_value("int32"))
+    ck.verify(te.min_value("int32") + x == 0, False)
+    ck.verify(0 == te.min_value("int32") - x, x == te.min_value("int32"))
+    ck.verify(0 == te.min_value("int32") + x, False)
+    ck.verify(-x + te.min_value("int32") == 0, x == te.min_value("int32"))
+    ck.verify(x + te.min_value("int32") == 0, False)
+    ck.verify(0 == -x + te.min_value("int32"), x == te.min_value("int32"))
+    ck.verify(0 == x + te.min_value("int32"), False)
+
+
+def test_proddiv_simplify():
+    ck = CanonicalChecker()
+    flm = tvm.te.floormod
+    fld = tvm.te.floordiv
+    tdiv = tvm.te.truncdiv
+    tmod = tvm.te.truncmod
+
+    x, y, z = te.var("x"), te.var("y"), te.var("y")
+
+    ck.verify(flm(x * 32 * x, x), 0)
+    ck.verify(flm(z * x * 32 * x * y, x * z), 0)
+    ck.verify(flm(z * x * 32 * x * y, x * z * y * 8 * x), 0)
+    ck.verify(flm(z * x * 32 * (x * y), 6 * x * z), flm(x * y * 16, 3) * (x * z * 2))
+    ck.verify(flm(x * 32 * x, x * z), flm(x * 32, z) * x)
+
+    ck.verify(tmod(x * 32 * x, x), 0)
+    ck.verify(tmod(z * x * 32 * x * y, x * z), 0)
+    ck.verify(tmod(z * x * 32 * (x * y), 6 * x * z), tmod(x * y * 16, 3) * (x * z * 2))
+    ck.verify(tmod(x * 32 * x, x * z), tmod(x * 32, z) * x)
+
+    ck.verify(fld(x * 2 * x * z, 4 * x * x * x), fld(z, x * 2))
+    ck.verify(fld(x * (2 * y) * 3, 3 * y), x * 2)
+    ck.verify(fld(x * (2 * y) * 3, 3 * y * z), fld(x * 2, z))
+
+    ck.verify(tdiv(x * 2 * x * z, 4 * x * x * x), tdiv(z, x * 2))
+    ck.verify(tdiv(x * (2 * y) * 3, 3 * y), x * 2)
+    ck.verify(tdiv(x * (2 * y) * 3, 3 * y * z), tdiv(x * 2, z))
+
+
+def test_floormod_two():
+    ck = CanonicalChecker()
+    flm = tvm.te.floormod
+    x, y = te.var("x"), te.var("y")
+    ck.verify(flm(x * 10 + 1 + y * 2 + 2, 2), 1)
+
+
+def test_simplify_le():
+    ck = CanonicalChecker()
+    # Case 1. Ignore the extra expr if it's small than the division number
+    x, y, z = te.var("x"), te.var("y"), te.var("z")
+    ck.analyzer.bind(y, tvm.ir.Range(0, 8))
+    ck.analyzer.bind(z, tvm.ir.Range(0, 2))
+    ck.verify(x * 8 + y < 16, x < 2)
+    ck.verify(x * 8 + z * 4 < 16, x < 2)
+    ck.verify(x * 8 + z * 4 < 16, x < 2)
+
+    # TODO: Not sure why `-2 < x` will be convert to `x > -2`, use a explicit simplify here.
+    ck.verify(x * -8 + y < 16, ck.analyzer.rewrite_simplify(-2 < x))
+    ck.verify(x * -8 + z * 4 < 16, ck.analyzer.rewrite_simplify(-2 < x))
+
+    ck.verify(x * 8 + y + z < 16, x * 8 + y + z < 16)
+    ck.verify(x * 8 + y - z < 16, x < 2)
+
+    n = te.size_var("n")
+    ck.verify(x * 8 + y < n, x * 8 + y < n)
+
+    # Case 2. Simplify the extra expr
+    x1, x2, ty, tx, vec = (
+        tvm.te.var("x1"),
+        tvm.te.var("x2"),
+        tvm.te.var("ty"),
+        tvm.te.var("tx"),
+        tvm.te.var("vec"),
+    )
+    ck.analyzer.bind(x1, tvm.ir.Range(0, 2))
+    ck.analyzer.bind(x2, tvm.ir.Range(0, 3))
+    ck.analyzer.bind(ty, tvm.ir.Range(0, 8))
+    ck.analyzer.bind(tx, tvm.ir.Range(0, 32))
+    ck.analyzer.bind(vec, tvm.ir.Range(0, 8))
+    ck.verify(
+        x1 * 5632 + (((x2 * 8 + ty) * 32 + tx) * 8 + vec) % 5632 < 11008,
+        x1 * 22 + (x2 * 8 + ty) % 22 < 43,
+    )
+    ck.verify(tx // 2 % 8 + vec < 8, tx % 16 // 2 + vec < 8)
+
+
+if __name__ == "__main__":
+    tvm.testing.main()

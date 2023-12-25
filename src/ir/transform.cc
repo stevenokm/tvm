@@ -182,44 +182,78 @@ Map<String, Map<String, String>> PassContext::ListConfigs() {
 
 PassContext PassContext::Create() { return PassContext(make_object<PassContextNode>()); }
 
+namespace {
+struct ClearOnError {
+  Array<instrument::PassInstrument>* instruments{nullptr};
+
+  ~ClearOnError() {
+    if (instruments) {
+      LOG(INFO) << "Pass instrumentation enter/exti failed.";
+      LOG(INFO) << "Disabling pass instrumentation.";
+      instruments->clear();
+    }
+  }
+};
+struct ExitContextOnError {
+  std::vector<instrument::PassInstrument> successes;
+
+  ~ExitContextOnError() {
+    for (auto it = successes.rbegin(); it != successes.rend(); it++) {
+      LOG(INFO) << (*it)->name << " exiting PassContext ...";
+      (*it)->ExitPassContext();
+      LOG(INFO) << (*it)->name << " exited PassContext.";
+    }
+  }
+};
+}  // namespace
+
 void PassContext::InstrumentEnterPassContext() {
   auto pass_ctx_node = this->operator->();
   if (pass_ctx_node->instruments.defined()) {
-    Array<instrument::PassInstrument> enter_successes;
-    try {
-      for (instrument::PassInstrument pi : pass_ctx_node->instruments) {
-        pi->EnterPassContext();
-        enter_successes.push_back(pi);
-      }
-    } catch (const Error& e) {
-      LOG(INFO) << "Pass instrumentation entering pass context failed.";
-      LOG(INFO) << "Disable pass instrumentation.";
-      pass_ctx_node->instruments.clear();
-
-      for (instrument::PassInstrument pi : enter_successes) {
-        LOG(INFO) << pi->name << " exiting PassContext ...";
-        pi->ExitPassContext();
-        LOG(INFO) << pi->name << " exited PassContext.";
-      }
-      enter_successes.clear();
-
-      throw e;
+    ClearOnError clear_context{&pass_ctx_node->instruments};
+    ExitContextOnError exit_context;
+    for (instrument::PassInstrument pi : pass_ctx_node->instruments) {
+      pi->EnterPassContext();
+      exit_context.successes.push_back(pi);
     }
+    exit_context.successes.clear();
+    clear_context.instruments = nullptr;
   }
 }
+
+namespace {
+
+struct ExitPassSuccesses {
+  ~ExitPassSuccesses() {
+    if (all_initialized) {
+      return;
+    }
+
+    LOG(INFO) << "Pass instrumentation entering pass context failed.";
+    LOG(INFO) << "Disable pass instrumentation.";
+    instruments->clear();
+
+    for (auto it = successes.rbegin(); it != successes.rend(); it++) {
+      LOG(INFO) << (*it)->name << " exiting PassContext ...";
+      (*it)->ExitPassContext();
+      LOG(INFO) << (*it)->name << " exited PassContext.";
+    }
+  }
+
+  bool all_initialized{false};
+  std::vector<instrument::PassInstrument> successes;
+  Array<instrument::PassInstrument>* instruments{nullptr};
+};
+}  // namespace
 
 void PassContext::InstrumentExitPassContext() {
   auto pass_ctx_node = this->operator->();
   if (pass_ctx_node->instruments.defined()) {
-    try {
-      for (instrument::PassInstrument pi : pass_ctx_node->instruments) {
-        pi->ExitPassContext();
-      }
-    } catch (const Error& e) {
-      LOG(INFO) << "Pass instrumentation exiting pass context failed.";
-      pass_ctx_node->instruments.clear();
-      throw e;
+    ClearOnError clear_context{&pass_ctx_node->instruments};
+    for (instrument::PassInstrument pi : pass_ctx_node->instruments) {
+      pi->ExitPassContext();
     }
+    clear_context.instruments = nullptr;
   }
 }
 
@@ -377,7 +411,6 @@ IRModule ModulePassNode::operator()(IRModule mod, const PassContext& pass_ctx) c
 
   VLOG_CONTEXT << pass_info->name;
   VLOG(0) << "Executing module pass with opt level: " << pass_info->opt_level;
-  VLOG(1) << "Input module:" << std::endl << PrettyPrint(mod);
 
   mod = pass_func(std::move(mod), pass_ctx);
 
@@ -388,8 +421,6 @@ IRModule ModulePassNode::operator()(IRModule mod, const PassContext& pass_ctx) c
 
   pass_ctx->diag_ctx.value().Render();
   pass_ctx->diag_ctx = previous;
-
-  VLOG(1) << "Result module:" << std::endl << PrettyPrint(mod);
 
   return mod;
 }
@@ -431,7 +462,7 @@ Pass GetPass(const String& pass_name) {
     // pass
   } else if ((f = Registry::Get("relay._transform." + pass_name))) {
   }
-  ICHECK(f != nullptr) << "Cannot use " << pass_name << "to create the pass";
+  ICHECK(f != nullptr) << "Cannot use " << pass_name << " to create the pass";
   return (*f)();
 }
 
@@ -440,6 +471,7 @@ Pass GetPass(const String& pass_name) {
 // ordering problem needs to be handled in the future.
 IRModule SequentialNode::operator()(IRModule mod, const PassContext& pass_ctx) const {
   for (const Pass& pass : passes) {
+    VLOG(0) << "Running pass " << pass->Info()->name;
     ICHECK(pass.defined()) << "Found undefined pass for optimization.";
     const PassInfo& pass_info = pass->Info();
     if (!pass_ctx.PassEnabled(pass_info)) {
@@ -589,7 +621,12 @@ TVM_REGISTER_GLOBAL("transform.OverrideInstruments")
 
 Pass PrintIR(String header, bool show_meta_data) {
   auto pass_func = [header, show_meta_data](IRModule mod, const PassContext& ctx) {
-    LOG(INFO) << "PrintIR(" << header << "):\n" << AsText(mod, show_meta_data);
+    if (const auto* f = runtime::Registry::Get("relay.ir.PrintIR")) {
+      if ((*f)(mod, header, show_meta_data)) {
+        return mod;
+      }
+    }
+    LOG(INFO) << "PrintIR(" << header << "):\n" << mod;
     return mod;
   };
   return CreateModulePass(pass_func, 0, "PrintIR", {});

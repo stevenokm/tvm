@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 import json
-import sys
 
 import pytest
 import tvm
@@ -59,7 +58,9 @@ def test_all_targets_device_type_verify():
         if tgt.kind.name not in tvm._ffi.runtime_ctypes.Device.STR2MASK:
             raise KeyError("Cannot find target kind: %s in Device.STR2MASK" % tgt.kind.name)
 
-        assert tgt.kind.device_type == tvm._ffi.runtime_ctypes.Device.STR2MASK[tgt.kind.name]
+        assert (
+            tgt.get_target_device_type() == tvm._ffi.runtime_ctypes.Device.STR2MASK[tgt.kind.name]
+        )
 
 
 def test_target_dispatch():
@@ -161,6 +162,13 @@ def test_target_string_with_spaces():
 
     assert target.attrs["device_name"] == "Name of GPU with spaces"
     assert target.attrs["device_type"] == "discrete"
+
+
+def test_target_llvm_options():
+    target = tvm.target.Target("llvm -cl-opt='-unroll-threshold:uint=100,-unroll-count:uint=3'")
+    assert sorted(target.attrs["cl-opt"]) == sorted(
+        ["-unroll-threshold:uint=100", "-unroll-count:uint=3"]
+    )
 
 
 def test_target_create():
@@ -468,6 +476,61 @@ def test_target_attr_bool_value():
     assert target2.attrs["supports_float16"] == 0
     target3 = Target("vulkan --supports_float16=false")
     assert target3.attrs["supports_float16"] == 0
+
+
+def test_target_features():
+    target_no_features = Target("cuda")
+    assert target_no_features.features
+    assert not target_no_features.features.is_test
+
+    target_with_features = Target("test")
+    assert target_with_features.features.is_test
+    assert not target_with_features.features.is_missing
+
+
+@tvm.testing.requires_cuda
+@pytest.mark.parametrize("input_device", ["cuda", tvm.cuda()])
+def test_target_from_device_cuda(input_device):
+    target = Target.from_device(input_device)
+
+    dev = tvm.cuda()
+    assert target.kind.name == "cuda"
+    assert target.attrs["max_threads_per_block"] == dev.max_threads_per_block
+    assert target.max_shared_memory_per_block == dev.max_shared_memory_per_block
+    assert target.thread_warp_size == dev.warp_size
+    assert target.arch == "sm_" + dev.compute_version.replace(".", "")
+
+
+@tvm.testing.requires_rocm
+@pytest.mark.parametrize("input_device", ["rocm", tvm.rocm()])
+def test_target_from_device_rocm(input_device):
+    target = Target.from_device(input_device)
+
+    dev = tvm.rocm()
+    assert target.kind.name == "rocm"
+    assert target.attrs["mtriple"] == "amdgcn-and-amdhsa-hcc"
+    assert target.attrs["max_threads_per_block"] == dev.max_threads_per_block
+    assert target.max_shared_memory_per_block == dev.max_shared_memory_per_block
+    assert target.thread_warp_size == dev.warp_size
+
+
+@tvm.testing.requires_vulkan
+@pytest.mark.parametrize("input_device", ["vulkan", tvm.vulkan()])
+def test_target_from_device_rocm(input_device):
+    target = Target.from_device(input_device)
+
+    f_get_target_property = tvm.get_global_func("device_api.vulkan.get_target_property")
+    dev = tvm.vulkan()
+    assert target.kind.name == "vulkan"
+    assert target.attrs["max_threads_per_block"] == dev.max_threads_per_block
+    assert target.max_shared_memory_per_block == dev.max_shared_memory_per_block
+    assert target.thread_warp_size == dev.warp_size
+    assert target.attrs["supports_float16"] == f_get_target_property(dev, "supports_float16")
+    assert target.attrs["supports_int16"] == f_get_target_property(dev, "supports_int16")
+    assert target.attrs["supports_int8"] == f_get_target_property(dev, "supports_int8")
+    assert target.attrs["supports_16bit_buffer"] == f_get_target_property(
+        dev, "supports_16bit_buffer"
+    )
 
 
 if __name__ == "__main__":

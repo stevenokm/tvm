@@ -26,6 +26,7 @@
 #include <dmlc/memory_io.h>
 #include <tvm/runtime/metadata.h>
 #include <tvm/runtime/module.h>
+#include <tvm/runtime/name_transforms.h>
 #include <tvm/runtime/ndarray.h>
 #include <tvm/runtime/packed_func.h>
 #include <tvm/runtime/registry.h>
@@ -67,15 +68,15 @@ class SourceModuleNode : public runtime::ModuleNode {
   SourceModuleNode(std::string code, std::string fmt) : code_(code), fmt_(fmt) {}
   const char* type_key() const final { return "source"; }
 
-  PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) final {
+  PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) final {
     LOG(FATAL) << "Source module cannot execute, to get executable module"
                << " build TVM with \'" << fmt_ << "\' runtime support";
     return PackedFunc();
   }
 
-  std::string GetSource(const std::string& format) final { return code_; }
+  String GetSource(const String& format) final { return code_; }
 
-  std::string GetFormat() { return fmt_; }
+  String GetFormat() override { return fmt_; }
 
  protected:
   std::string code_;
@@ -95,7 +96,7 @@ class CSourceModuleNode : public runtime::ModuleNode {
       : code_(code), fmt_(fmt), const_vars_(const_vars), func_names_(func_names) {}
   const char* type_key() const final { return "c"; }
 
-  PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) final {
+  PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) final {
     // Currently c-source module is used as demonstration purposes with binary metadata module
     // that expects get_symbol interface. When c-source module is used as external module, it
     // will only contain one function. However, when its used as an internal module (e.g., target
@@ -114,11 +115,44 @@ class CSourceModuleNode : public runtime::ModuleNode {
     }
   }
 
-  std::string GetSource(const std::string& format) final { return code_; }
+  String GetSource(const String& format) final { return code_; }
 
-  std::string GetFormat() { return fmt_; }
+  String GetFormat() override { return fmt_; }
 
-  void SaveToFile(const std::string& file_name, const std::string& format) final {
+  void SaveToBinary(dmlc::Stream* stream) final {
+    stream->Write(code_);
+    stream->Write(fmt_);
+
+    std::vector<std::string> func_names;
+    for (const auto func_name : func_names_) func_names.push_back(func_name);
+    std::vector<std::string> const_vars;
+    for (auto const_var : const_vars_) const_vars.push_back(const_var);
+    stream->Write(func_names);
+    stream->Write(const_vars);
+  }
+
+  static runtime::Module LoadFromBinary(void* strm) {
+    dmlc::Stream* stream = static_cast<dmlc::Stream*>(strm);
+
+    std::string code, fmt;
+    ICHECK(stream->Read(&code)) << "Loading code failed";
+    ICHECK(stream->Read(&fmt)) << "Loading format failed";
+
+    std::vector<std::string> tmp_func_names, tmp_const_vars;
+    CHECK(stream->Read(&tmp_func_names)) << "Loading func names failed";
+    CHECK(stream->Read(&tmp_const_vars)) << "Loading const vars failed";
+
+    Array<String> func_names;
+    for (auto func_name : tmp_func_names) func_names.push_back(String(func_name));
+
+    Array<String> const_vars;
+    for (auto const_var : tmp_const_vars) const_vars.push_back(String(const_var));
+
+    auto n = make_object<CSourceModuleNode>(code, fmt, func_names, const_vars);
+    return runtime::Module(n);
+  }
+
+  void SaveToFile(const String& file_name, const String& format) final {
     std::string fmt = GetFileFormat(file_name, format);
     std::string meta_file = GetMetaFilePath(file_name);
     if (fmt == "c" || fmt == "cc" || fmt == "cpp" || fmt == "cu") {
@@ -129,7 +163,10 @@ class CSourceModuleNode : public runtime::ModuleNode {
     }
   }
 
-  bool IsDSOExportable() const final { return true; }
+  int GetPropertyMask() const override {
+    return runtime::ModulePropertyMask::kBinarySerializable |
+           runtime::ModulePropertyMask::kDSOExportable;
+  }
 
   bool ImplementsFunction(const String& name, bool query_imports) final {
     return std::find(func_names_.begin(), func_names_.end(), name) != func_names_.end();
@@ -149,6 +186,9 @@ runtime::Module CSourceModuleCreate(const String& code, const String& fmt,
                                           func_names, const_vars);
   return runtime::Module(n);
 }
+
+TVM_REGISTER_GLOBAL("runtime.module.loadbinary_c")
+    .set_body_typed(CSourceModuleNode::LoadFromBinary);
 
 /*!
  * \brief A concrete class to get access to base methods of CodegenSourceBase.
@@ -180,14 +220,14 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
   }
   const char* type_key() const final { return "c"; }
 
-  std::string GetSource(const std::string& format) final { return code_.str(); }
+  String GetSource(const String& format) final { return code_.str(); }
 
-  std::string GetFormat() { return fmt_; }
-  PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) final {
+  String GetFormat() override { return fmt_; }
+  PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) final {
     return PackedFunc();
   }
 
-  void SaveToFile(const std::string& file_name, const std::string& format) final {
+  void SaveToFile(const String& file_name, const String& format) final {
     std::string fmt = GetFileFormat(file_name, format);
     std::string meta_file = GetMetaFilePath(file_name);
     if (fmt == "c" || fmt == "cc" || fmt == "cpp") {
@@ -199,7 +239,7 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
     }
   }
 
-  bool IsDSOExportable() const final { return true; }
+  int GetPropertyMask() const override { return runtime::ModulePropertyMask::kDSOExportable; }
 
   bool ImplementsFunction(const String& name, bool query_imports) final {
     return std::find(func_names_.begin(), func_names_.end(), name) != func_names_.end();
@@ -328,8 +368,7 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
       code_ << "};";
       code_ << "// of total size " << allocated_size << " bytes\n";
     } else {
-      LOG(FATAL) << "No constant data in constant pool found "
-                 << PrettyPrint(GetRef<ObjectRef>(pool_info));
+      LOG(FATAL) << "No constant data in constant pool found " << GetRef<ObjectRef>(pool_info);
     }
   }
 
@@ -469,8 +508,8 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
           String pool_name_tvmv = GenerateDLTensorStructWrapper(pool_name);
           code_ << "tensors[" << i << "] = " << pool_name_tvmv << ";\n";
         } else {
-          code_ << "tensors[" << i << "] = ((TVMValue*)args)["
-                << run_func_to_entry_point_args[Integer(i)] << "];\n";
+          code_ << "tensors[" << i << "] = ((TVMValue*)args)[" << run_func_to_entry_point_args[i]
+                << "];\n";
         }
       }
     }
@@ -507,7 +546,7 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
           } else {
             codegen_c_base_.PrintType(input_var.dtype(), call_args_ss);
           }
-          call_args_ss << " " << relay::backend::SanitizeName(input_var->name_hint) << ",";
+          call_args_ss << " " << tvm::runtime::SanitizeName(input_var->name_hint) << ",";
         }
         for (unsigned int i = 0; i < metadata_->outputs.size(); ++i) {
           call_args_ss << "void* output" << i << ",";
@@ -565,10 +604,10 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
       std::stringstream call_args_ss;
       if (metadata_->io_pool_allocations.empty()) {
         for (const auto& input : metadata_->inputs) {
-          call_args_ss << "inputs->" << relay::backend::SanitizeName(input->name_hint) << ",";
+          call_args_ss << "inputs->" << tvm::runtime::SanitizeName(input->name_hint) << ",";
         }
         for (const auto& output : metadata_->outputs) {
-          call_args_ss << "outputs->" << relay::backend::SanitizeName(output);
+          call_args_ss << "outputs->" << tvm::runtime::SanitizeName(output);
           call_args_ss << ",";
         }
       }
@@ -578,7 +617,7 @@ class CSourceCrtMetadataModuleNode : public runtime::ModuleNode {
         if (IsInternalWorkspaceBuffer(pool_var)) {
           call_args_ss << "&" << pool_name << ",";
         } else {
-          call_args_ss << "workspace_pools->" << relay::backend::SanitizeName(pool_name) << ",";
+          call_args_ss << "workspace_pools->" << tvm::runtime::SanitizeName(pool_name) << ",";
         }
       }
       for (const String& device : metadata_->devices) {
@@ -733,7 +772,7 @@ class MetadataSerializer : public AttrVisitor {
 
       switch (array->kind) {
         case MetadataKind::kUint64: {
-          int64_t i = Downcast<Integer>(o);
+          int64_t i = Downcast<Integer>(o).IntValue();
           CHECK_GT(i, 0)
               << "Metadata is of type uint64_t, but array type contains a negative number";
           uint64_t ui = static_cast<uint64_t>(i);
@@ -741,7 +780,7 @@ class MetadataSerializer : public AttrVisitor {
           continue;
         }
         case MetadataKind::kInt64: {
-          int64_t i = Downcast<Integer>(o);
+          int64_t i = Downcast<Integer>(o).IntValue();
           Visit(nullptr, &i);
           continue;
         }
@@ -929,11 +968,21 @@ runtime::Module CreateCSourceCrtMetadataModule(const Array<runtime::Module>& mod
                                                relay::backend::ExecutorCodegenMetadata metadata,
                                                runtime::metadata::Metadata aot_metadata) {
   Array<runtime::Module> final_modules(modules);
-  if (aot_metadata.defined()) {
-    final_modules.push_back(CreateAotMetadataModule(aot_metadata, true));
+  Array<String> func_names;
+
+  if (metadata.defined()) {
+    if (metadata->executor == "aot") {
+      if (aot_metadata.defined()) {
+        final_modules.push_back(CreateAotMetadataModule(aot_metadata, true));
+      }
+
+      // add the run function (typically "tvmgen_default_run") to function registry
+      // when using AOT executor
+      std::string run_func = runtime::get_name_mangled(metadata->mod_name, "run");
+      func_names.push_back(run_func);
+    }
   }
 
-  Array<String> func_names;
   for (runtime::Module mod : final_modules) {
     auto pf_funcs = mod.GetFunction("get_func_names");
     if (pf_funcs != nullptr) {
@@ -984,13 +1033,13 @@ class DeviceSourceModuleNode final : public runtime::ModuleNode {
                          std::function<std::string(const std::string&)> fget_source)
       : data_(data), fmt_(fmt), fmap_(fmap), type_key_(type_key), fget_source_(fget_source) {}
 
-  PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) final {
+  PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) final {
     LOG(FATAL) << "Source module cannot execute, to get executable module"
                << " build TVM with \'" << fmt_ << "\' runtime support";
     return PackedFunc();
   }
 
-  std::string GetSource(const std::string& format) final {
+  String GetSource(const String& format) final {
     if (fget_source_ != nullptr) {
       return fget_source_(format);
     } else {
@@ -999,8 +1048,10 @@ class DeviceSourceModuleNode final : public runtime::ModuleNode {
   }
 
   const char* type_key() const final { return type_key_.c_str(); }
+  /*! \brief Get the property of the runtime module .*/
+  int GetPropertyMask() const final { return runtime::ModulePropertyMask::kBinarySerializable; }
 
-  void SaveToFile(const std::string& file_name, const std::string& format) final {
+  void SaveToFile(const String& file_name, const String& format) final {
     std::string fmt = GetFileFormat(file_name, format);
     ICHECK_EQ(fmt, fmt_) << "Can only save to format=" << fmt_;
     std::string meta_file = GetMetaFilePath(file_name);

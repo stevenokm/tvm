@@ -29,6 +29,7 @@
 #include <tvm/relay/expr_functor.h>
 #include <tvm/relay/runtime.h>
 #include <tvm/runtime/device_api.h>
+#include <tvm/runtime/name_transforms.h>
 #include <tvm/runtime/object.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -44,6 +45,7 @@
 #include <vector>
 
 #include "../../target/source/codegen_source_base.h"
+#include "../../tir/transforms/ir_utils.h"
 #include "../op/annotation/annotation.h"
 #include "../op/call/call.h"
 #include "../op/memory/device_copy.h"
@@ -452,7 +454,32 @@ class AOTExecutorCodegen : public MixedModeVisitor {
         // call_extern calling convention with optional context
         if (has_c_device_api_context) {
           device_context = device_contexts_.Get(global_var).value();
-          args.push_back(device_context);
+
+          // call_extern has no further legalization steps, and
+          // requires the number of arguments to match exactly.    For
+          // internal calls, conditionally append the device context.
+          bool requires_device_context = [&]() -> bool {
+            Optional<Integer> opt = num_arguments_.Get(global_var);
+            if (!opt.defined()) {
+              // For external calls, we must trust that the user has
+              // supplied a kernel that accepts a device_context
+              // argument.
+              return true;
+            }
+            int num_callee_params = opt.value()->value;
+            int num_args = call_lowered_props.arguments.size();
+            if (num_callee_params == num_args) {
+              return false;
+            } else if (num_callee_params == num_args + 1) {
+              return true;
+            } else {
+              LOG(FATAL) << "Callee " << global_var << " requires " << num_callee_params
+                         << ", but is called with " << num_args << " arguments.";
+            }
+          }();
+          if (requires_device_context) {
+            args.push_back(device_context);
+          }
         }
         func_call = tir::Evaluate(AddCheckReturn(
             tvm::tir::Call(DataType::Int(32), tvm::tir::builtin::call_extern(), args)));
@@ -493,8 +520,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
       }));
     }
 
-    tir::Stmt body = tir::SeqStmt({func_call});
-    LOG(INFO) << "CreateFuncCall: " << call_lowered_props.lowered_func->name_hint << " -> " << body;
+    tir::Stmt body = tir::SeqStmt::Flatten(func_call);
     stmts_.push_back(body);
   }
 
@@ -505,18 +531,34 @@ class AOTExecutorCodegen : public MixedModeVisitor {
    * copy-on-write fashion.
    */
   void CopyToOutput(PrimExpr out, PrimExpr in, bool pack_input, size_t size) {
+    std::vector<tir::Stmt> let_nest;
+
     // Define intermediate DLTensor to load/store the data
     tir::Buffer tmp_read =
         tir::decl_buffer({IntImm(DataType::UInt(64), size)}, DataType::UInt(8), "tmp_read");
     tir::Buffer tmp_write =
         tir::decl_buffer({IntImm(DataType::UInt(64), size)}, DataType::UInt(8), "tmp_write");
-    te::Var loop_idx("i", DataType::Int(32));
-    auto retval_i = tir::BufferLoad(tmp_read, {loop_idx});
+
+    // Re-use in/out as the buffer var, if possible
+    if (auto opt = out.as<tir::Var>()) {
+      tmp_write.CopyOnWrite()->data = opt.value();
+    } else {
+      let_nest.push_back(tir::LetStmt(tmp_write->data, out, tir::Evaluate(0)));
+    }
+    if (auto opt = in.as<tir::Var>()) {
+      tmp_read.CopyOnWrite()->data = opt.value();
+    } else {
+      let_nest.push_back(tir::LetStmt(tmp_read->data, in, tir::Evaluate(0)));
+    }
+
     // Copy the variable from the input to the output
-    tir::Stmt copy = tir::For(
-        loop_idx, 0, tir::make_const(DataType::Int(32, 1), size, Span()), tir::ForKind::kSerial,
-        tir::BufferStore(tmp_write, tir::Let(tmp_read->data, in, retval_i), {loop_idx}));
-    stmts_.push_back(tir::LetStmt(tmp_write->data, out, copy));
+    te::Var loop_idx("i", DataType::Int(32));
+    tir::Stmt copy = tir::BufferStore(tmp_write, tir::BufferLoad(tmp_read, {loop_idx}), {loop_idx});
+    copy = tir::For(loop_idx, 0, tir::make_const(DataType::Int(32, 1), size, Span()),
+                    tir::ForKind::kSerial, copy);
+    copy = tir::MergeNest(let_nest, copy);
+
+    stmts_.push_back(copy);
   }
 
   /*
@@ -535,7 +577,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
         return;
       }
       if (target_attr_map[target_kind.value()]) {
-        std::string context_name = SanitizeName(device_context_name);
+        std::string context_name = tvm::runtime::SanitizeName(device_context_name);
         tir::Var device_context_var("device_context_" + context_name, DataType::Handle());
 
         auto pair = target_contexts.find(target_kind.value());
@@ -570,7 +612,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
                                         {tvm::tir::StringImm(device_hook_name), context})));
       device_hooks.push_back(device_hook);
     }
-    return tir::SeqStmt(device_hooks);
+    return tir::SeqStmt::Flatten(device_hooks);
   }
 
   /**
@@ -618,7 +660,6 @@ class AOTExecutorCodegen : public MixedModeVisitor {
       // TODO(mbs): device_copy cleaunp
       // Suspect treating as no-op is better since already built into the StorageInfo?
       LOG(FATAL) << "The AOT executor does not currently support device_copy";
-      return;
     }
 
     // At this point we should only see calls of the form call_lowered(@callee, (args...)),
@@ -737,7 +778,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
   // the packed function calls don't pack their arguments. The AOT
   // runner function needs to be legalized by the LegalizePackedCalls pass.
   tir::PrimFunc CreateMainFunc(String mod_name, unsigned int relay_params) {
-    tir::Stmt body = tir::SeqStmt(stmts_);
+    tir::Stmt body = tir::SeqStmt::Flatten(stmts_);
     // Allocate the sids
     std::unordered_map<int, bool> allocated;
 
@@ -803,7 +844,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
     tir::Stmt final_body = tir::SeqStmt({device_activations, body, device_deactivations});
 
     // Make the PrimFunc
-    return tir::PrimFunc(main_signature_, final_body, VoidType(), main_buffer_map_, {},
+    return tir::PrimFunc(main_signature_, final_body, VoidType(), main_buffer_map_,
                          DictAttrs(dict_attrs));
   }
 
@@ -991,6 +1032,8 @@ class AOTExecutorCodegen : public MixedModeVisitor {
   Map<String, tir::Var> devices_;
   /*! \brief map of GlobalVars to C Device API contexts */
   Map<GlobalVar, tir::Var> device_contexts_;
+  /*! \brief map of GlobalVars to the number of arguments they require */
+  Map<GlobalVar, Integer> num_arguments_;
   /*! \brief input and output variables belonging to the main function signature */
   Array<tir::Var> main_signature_;
   /*! \brief input and output variables belonging to the main function signature */
@@ -1097,8 +1140,14 @@ class AOTExecutorCodegen : public MixedModeVisitor {
           tec::UpdateFunctionMetadata(func, this->function_metadata_, workspace_byte_alignment);
         })(mod);
 
+    transform::PassContext pass_ctx = transform::PassContext::Current();
+    bool enable_remove_reshapes =
+        pass_ctx->GetConfig<Bool>("relay.remove_standalone_reshapes.enable", Bool(true)).value();
+    if (enable_remove_reshapes) {
+      lowered_mod = transform::RemoveStandaloneReshapes()(lowered_mod);
+    }
     auto lowered_main = lowered_mod->Lookup("main");
-    auto lowered_main_func = GetRef<Function>(lowered_main.as<FunctionNode>());
+    auto lowered_main_func = Downcast<Function>(lowered_main);
 
     // Post-lowering storage map for writing main func
     AOTOnDemandAllocator final_aot_allocator;
@@ -1161,17 +1210,34 @@ class AOTExecutorCodegen : public MixedModeVisitor {
     }
 
     CollectDeviceVariables(lowered_mod->GetAttr<Map<GlobalVar, String>>("device_contexts").value());
+    num_arguments_ = [&]() -> Map<GlobalVar, Integer> {
+      Map<GlobalVar, Integer> arg_count;
+      for (const auto& [gvar, func] : lowered_mod->functions) {
+        if (const auto* prim_func = func.as<tir::PrimFuncNode>()) {
+          arg_count.Set(gvar, prim_func->params.size());
+        }
+      }
+      return arg_count;
+    }();
     VisitExpr(lowered_main_func->body);
 
     // Create the runner function. Please note that the function is not legal yet
     // because the packed calls arguments are not wrapped in TVMValues. To make this happen we need
     // to run the LegalizePackedCalls pass.
     LoweredOutput ret;
-    ret.params = std::unordered_map<std::string, std::pair<int, const tvm::runtime::NDArray>>();
-    for (auto param : params_) {
-      ret.params.emplace(std::make_pair(
-          param.first,
-          std::make_pair(static_cast<int>(param_storage_ids_[param.first]), param.second)));
+
+    // Collect any constants extracted by external codegen.
+    ret.params = std::unordered_map<std::string, tvm::runtime::NDArray>();
+    Map<String, runtime::NDArray> const_name_to_constant =
+        lowered_mod->GetAttr<Map<String, runtime::NDArray>>(tvm::attr::kConstNameToConstant)
+            .value_or({});
+    for (const auto& kv : const_name_to_constant) {
+      ICHECK(ret.params.emplace(kv.first, kv.second).second);
+    }
+
+    // Collect any constants extracted during lowering.
+    for (const auto& kv : params_) {
+      ICHECK(ret.params.emplace(kv.first, kv.second).second);
     }
 
     // AoT Executor codegen works completely on TIR beyond this point, hence removing relay main
@@ -1196,8 +1262,15 @@ class AOTExecutorCodegen : public MixedModeVisitor {
     // Parallel for loops are not supported in AoT codegen.
     lowered_mod = tir::transform::ConvertForLoopsToSerial()(lowered_mod);
 
-    transform::PassContext pass_ctx = transform::PassContext::Current();
-    bool enable_usmp = pass_ctx->GetConfig<Bool>(kUSMPEnableOption, Bool(false)).value();
+    // Check USMP option
+    bool enable_usmp = false;
+    if (runtime_config->name == kTvmRuntimeCrt) {
+      enable_usmp = true;
+    }
+    if (pass_ctx->GetConfig<Bool>(kUSMPEnableOption) != nullptr) {
+      enable_usmp = pass_ctx->GetConfig<Bool>(kUSMPEnableOption, Bool(false)).value();
+    }
+
     if (enable_usmp) {
       lowered_mod = PlanMemoryWithUSMP(lowered_mod);
     } else {
@@ -1212,9 +1285,9 @@ class AOTExecutorCodegen : public MixedModeVisitor {
       lowered_mod = pack_calls(lowered_mod);
     }
 
-    Optional<Array<tvm::runtime::Module>> external_modules =
-        lowered_mod->GetAttr<Array<tvm::runtime::Module>>("external_mods");
-    ICHECK(external_modules) << "Attribute \"external_mods\" should be set at this point.";
+    // Collect any runtime modules generated by external codegen.
+    ret.external_mods =
+        lowered_mod->GetAttr<Array<tvm::runtime::Module>>(tvm::attr::kExternalMods).value_or({});
 
     // This is the point where we separate the functions in the module by target
     VLOG(1) << "lowered module:" << std::endl << PrettyPrint(lowered_mod);
@@ -1226,8 +1299,6 @@ class AOTExecutorCodegen : public MixedModeVisitor {
               << "maps to:" << std::endl
               << PrettyPrint(kv.second);
     }
-
-    ret.external_mods = external_modules.value();
 
     // Extract USMP metadata to pass onto metadata sources
     Map<tir::Var, tir::usmp::AllocatedPoolInfo> pool_var_info;
@@ -1292,7 +1363,7 @@ class AOTExecutorCodegen : public MixedModeVisitor {
 class AOTExecutorCodegenModule : public runtime::ModuleNode {
  public:
   AOTExecutorCodegenModule() {}
-  virtual PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) {
+  virtual PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) {
     if (name == "init") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         ICHECK_EQ(args.num_args, 2) << "The expected of arguments are: "
@@ -1315,11 +1386,6 @@ class AOTExecutorCodegenModule : public runtime::ModuleNode {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         String key = args[0];
         *rv = get_param_by_name(key);
-      });
-    } else if (name == "get_param_id") {
-      return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
-        String key = args[0];
-        *rv = get_param_id(key);
       });
     } else if (name == "get_irmodule") {
       return PackedFunc(
@@ -1345,6 +1411,9 @@ class AOTExecutorCodegenModule : public runtime::ModuleNode {
 
   const char* type_key() const final { return "RelayGraphRuntimeCodegenModule"; }
 
+  /*! \brief Get the property of the runtime module .*/
+  int GetPropertyMask() const final { return runtime::ModulePropertyMask::kRunnable; }
+
  private:
   void init(void* mod, const Array<Target>& targets) {
     codegen_ =
@@ -1362,16 +1431,10 @@ class AOTExecutorCodegenModule : public runtime::ModuleNode {
   runtime::NDArray get_param_by_name(String key) {
     auto it = this->output_.params.find(key);
     CHECK(it != this->output_.params.end()) << "no such parameter " << key;
-    return (*it).second.second;
+    return (*it).second;
   }
 
   Array<tvm::runtime::Module> get_external_modules() { return output_.external_mods; }
-
-  int get_param_id(String key) {
-    auto it = this->output_.params.find(key);
-    CHECK(it != this->output_.params.end()) << "no such parameter " << key;
-    return (*it).second.first;
-  }
 
   Map<Target, IRModule> get_irmodule() { return this->output_.lowered_funcs; }
 

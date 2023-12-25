@@ -750,6 +750,37 @@ def test_not_match_dominator():
     assert not diamond.match(out)
 
 
+def test_not_match_dominator2():
+    # Pattern
+    P = is_op("nn.conv2d")(wildcard(), wildcard())  # 'parent'
+    I = is_op("nn.relu")(wildcard())  # 'intermediate' ('path' in the code)
+    C = is_op("add")(wildcard(), wildcard())  # 'child'
+    pattern = dominates(P, I, C)
+
+    #       n6(P)
+    #      /  \
+    #     n7   \
+    #    /      \
+    #    n8(P)  n9(I)
+    #    \      /
+    #     \    /
+    #      \  /
+    #      n10(C)
+
+    x = relay.var("x")
+    w = relay.var("w")
+    n6 = relay.op.nn.conv2d(x, w)  # matches P
+    n7 = relay.op.tanh(n6)  # does not match I
+    n8 = relay.op.nn.conv2d(n7, w)  # matches P
+    n9 = relay.op.nn.relu(n6)  # matches I
+    n10 = relay.add(n8, n9)  # matches C
+
+    # Does not match: Can't match the parent pattern P at both 8 and 6.
+    # Note that if we did allow P to be used twice the implementation would
+    # need to be changed to not 'jump over' n7.
+    assert not pattern.match(n10)
+
+
 def test_match_typed_dominator():
     # Pattern
     is_conv2d = is_op("nn.conv2d")(wildcard(), wildcard())
@@ -1609,6 +1640,39 @@ def test_partition_function():
     assert tvm.ir.structural_equal(pattern.partition(expr), expr2)
 
 
+def test_partition_optional_function():
+    x = relay.var("x")
+    w = relay.var("w")
+    b = relay.var("b")
+
+    x1 = relay.var("x1")
+    w1 = relay.var("w1")
+
+    wc_x = wildcard()
+    wc_w = wildcard()
+    wc_x1 = wildcard()
+    wc_w1 = wildcard()
+
+    func_pattern0 = FunctionPattern(
+        [wc_x1, wc_w1], is_op("sigmoid")(is_op("nn.conv2d")(wc_x1, wc_w1))
+    )
+    func_pattern1 = FunctionPattern(
+        [wc_x1, wc_w1], is_op("nn.relu")(is_op("nn.conv2d")(wc_x1, wc_w1))
+    )
+    pattern = func_pattern0(wc_x, wc_w) | func_pattern1(wc_x, wc_w)
+
+    func = relay.Function([x1, w1], relay.nn.relu(relay.nn.conv2d(x1, w1)))
+    expr = func(x, w) + b
+
+    x2 = relay.var("x2")
+    w2 = relay.var("w2")
+    func2 = relay.Function([x2, w2], func(x2, w2)).with_attr(
+        "PartitionedFromPattern", "nn.conv2d_nn.relu_FunctionCall_"
+    )
+    expr2 = func2(x, w) + b
+    assert tvm.ir.structural_equal(pattern.partition(expr), expr2)
+
+
 def test_rewrite_function_with_fuzzy_body():
     """Allow Rewriting a function with a fuzzy body via dominator analysis"""
     x = relay.var("x")
@@ -1771,29 +1835,90 @@ def test_rewrite_once():
             if new_args:
                 return relay.op.concatenate(relay.expr.Tuple(new_args), axis=0)
             else:
-                return concat_args
+                return concat_args[0]
 
     x = relay.var("x")
     y = relay.var("y")
     z = relay.var("z")
     concat = relay.op.concatenate(relay.expr.Tuple([x, y, z]), axis=0)
 
-    # Let the rewriter run recursively
-    out = rewrite(ConcatRewriter(False), concat)
-    expected = relay.expr.Tuple([x])
-    assert tvm.ir.structural_equal(out, expected)
+    def test_one_callback():
+        # Let the rewriter run recursively
+        out = rewrite(ConcatRewriter(False), concat)
+        expected = x
+        assert tvm.ir.structural_equal(out, expected)
 
-    # Run the rewriter once
-    out = rewrite(ConcatRewriter(True), concat)
-    expected = relay.op.concatenate(relay.expr.Tuple([x, y]), axis=0)
-    assert tvm.ir.structural_equal(out, expected)
+        # Run the rewriter once
+        out = rewrite(ConcatRewriter(True), concat)
+        expected = relay.op.concatenate(relay.expr.Tuple([x, y]), axis=0)
+        assert tvm.ir.structural_equal(out, expected)
+
+    def test_multi_callbacks():
+        # This class recursively add a nn.relu operator after nn.softmax
+        class OneMoreReluRewriter(DFPatternCallback):
+            def __init__(self, rewrite_once):
+                super().__init__(rewrite_once=rewrite_once)
+                self.pattern = is_op("nn.softmax")(None)
+
+            def callback(self, pre, post, node_map):
+                return relay.nn.relu(post)
+
+        def before():
+            # Before:
+            #    x    y    z
+            #    |    |    |
+            #       concat
+            #         |
+            #      softmax
+            return relay.nn.softmax(concat)
+
+        def once_concat():
+            # ConcatRewrite once, OneMoreReluRewrite once
+            # Expected:
+            #   x    y
+            #   |    |
+            #   concat
+            #      |
+            #   softmax
+            #      |
+            #    relu
+            return relay.nn.relu(
+                relay.nn.softmax(relay.op.concatenate(relay.expr.Tuple([x, y]), axis=0))
+            )
+
+        def recursive_concat():
+            # ConcatRewrite recursively, OneMoreReluRewrite once
+            # Expected:
+            #      x
+            #      |
+            #   softmax
+            #      |
+            #    relu
+            return relay.nn.relu(relay.nn.softmax(x))
+
+        # Run ConcatRewriter once, OneMoreReluRewriter once
+        out = rewrite(
+            [OneMoreReluRewriter(True), ConcatRewriter(True)],
+            before(),
+        )
+        assert tvm.ir.structural_equal(out, once_concat())
+
+        # Run ConcatRewriter recursively, OneMoreReluRewriter once
+        out = rewrite(
+            [OneMoreReluRewriter(True), ConcatRewriter(False)],
+            before(),
+        )
+        assert tvm.ir.structural_equal(out, recursive_concat())
+
+    test_one_callback()
+    test_multi_callbacks()
 
 
 def test_matched_outside_but_dominated():
     """In this example the pattern matches the nn.conv2d/add/multiply flow. Even though the
     add output is consumed by the sigmoid, the sigmoid itself is dominated by the multiply.
     So partitioning can proceed, all be it with a duplication of the add."""
-    in_mod = tvm.parser.parse(
+    in_mod = tvm.relay.parse(
         """
         #[version = "0.0.5"]
         def @main(%data: Tensor[(16, 16, 32, 32), float16], %weight: Tensor[(32, 16, 3, 3), float16], %bias: Tensor[(32), float32]) -> Tensor[(16, 32, 32, 32), float32] {
@@ -1810,7 +1935,7 @@ def test_matched_outside_but_dominated():
         }
         """
     )
-    expected_mod = tvm.parser.parse(
+    expected_mod = tvm.relay.parse(
         """
         #[version = "0.0.5"]
         def @main(%data: Tensor[(16, 16, 32, 32), float16], %weight: Tensor[(32, 16, 3, 3), float16], %bias: Tensor[(32), float32]) -> Tensor[(16, 32, 32, 32), float32] {
@@ -1838,6 +1963,92 @@ def test_matched_outside_but_dominated():
     actual_mod = tvm.IRModule.from_expr(pattern.partition(in_mod["main"]))
     actual_mod = relay.transform.InferType()(actual_mod)
     tvm.ir.assert_structural_equal(actual_mod, expected_mod)
+
+
+def test_partition_parallel_branch_with_same_input():
+    """In this example, conv2d's two consumer(add and multiply) on two different branches are
+    merged into one partition, make sure that the partitioned function has no redundant parameters"""
+    # Pattern
+    path1 = is_op("multiply")(wildcard(), wildcard())
+    path2 = is_op("add")(wildcard(), wildcard())
+    pattern = is_op("add")(path1, path2)
+
+    i = relay.Var("input")
+    w = relay.Var("weight")
+    l = relay.Var("left")
+    r = relay.Var("right")
+
+    conv2d = relay.op.nn.conv2d(i, w)
+    branch1 = relay.multiply(l, conv2d)
+    branch2 = relay.add(conv2d, r)
+    add = relay.add(branch1, branch2)
+
+    lf = relay.Var("leftf")
+    mf = relay.Var("midf")
+    rf = relay.Var("rightf")
+    f = relay.Function([lf, mf, rf], (lf * mf) + (mf + rf)).with_attr(
+        "PartitionedFromPattern", "multiply_add_add_"
+    )
+
+    partitioned = pattern.partition(add)
+    reference = f(l, conv2d, r)
+    assert tvm.ir.structural_equal(partitioned, reference)
+
+
+def test_rewrite_with_pattern_recursion():
+    data = relay.var("data", relay.TensorType((2, 8), "float32"))
+    dense_weight = relay.const(np.zeros((4, 8)))
+    feat = relay.nn.dense(data, dense_weight)
+    feat = relay.cast(feat, "float32")
+    feat = relay.cast(feat, "float32")
+    feat = relay.cast(feat, "float32")
+    feat = relay.cast(feat, "float32")
+    feat = relay.cast(feat, "float32")
+    oup = relay.cast(feat, "float32")
+
+    expected = relay.nn.relu(oup)
+
+    class TheRewrite(DFPatternCallback):
+        def __init__(self, pattern):
+            super(TheRewrite, self).__init__(rewrite_once=True)
+            self.pattern = pattern
+
+        def callback(self, pre, post, node_map):
+            return relay.nn.relu(post)
+
+    def test_reset_call_args():
+        dense_pattern = is_op("nn.dense")(wildcard(), wildcard())
+        wildcard_redirect = wildcard()
+        the_pattern = is_op("cast")(wildcard_redirect)
+        the_pattern2 = the_pattern | dense_pattern
+        wildcard_redirect.redirect_to(the_pattern2)
+
+        actual = rewrite(TheRewrite(the_pattern), oup)
+        tvm.ir.assert_structural_equal(actual, expected)
+
+    def test_reset_alt_left():
+        dense_pattern = is_op("nn.dense")(wildcard(), wildcard())
+        wildcard_redirect = wildcard()
+        or_pattern = wildcard_redirect | dense_pattern
+        the_pattern = is_op("cast")(or_pattern)
+        wildcard_redirect.redirect_to(the_pattern)
+
+        actual = rewrite(TheRewrite(the_pattern), oup)
+        tvm.ir.assert_structural_equal(actual, expected)
+
+    def test_reset_alt_right():
+        dense_pattern = is_op("nn.dense")(wildcard(), wildcard())
+        wildcard_redirect = wildcard()
+        or_pattern = dense_pattern | wildcard_redirect
+        the_pattern = is_op("cast")(or_pattern)
+        wildcard_redirect.redirect_to(the_pattern)
+
+        actual = rewrite(TheRewrite(the_pattern), oup)
+        tvm.ir.assert_structural_equal(actual, expected)
+
+    test_reset_call_args()
+    test_reset_alt_left()
+    test_reset_alt_right()
 
 
 if __name__ == "__main__":

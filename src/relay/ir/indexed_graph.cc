@@ -420,7 +420,7 @@ std::unique_ptr<IndexedGraph<DFPattern>> CreateIndexedGraph(const DFPattern& pat
     std::unique_ptr<IndexedGraph<DFPattern>> graph_;
   };
 
-  /*! \brief Annotator takes an IndexedGraph, fills it's forward outputs, and does domiantor tree
+  /*! \brief Annotator takes an IndexedGraph, fills it's forward outputs, and does dominator tree
    * analysis.
    *
    *  Annotator use ExprFunctor to visit nodes, but iterates over them in pre-determined
@@ -537,7 +537,12 @@ std::unique_ptr<IndexedGraph<DFPattern>> CreateIndexedGraph(const DFPattern& pat
 
     void VisitDFPattern_(const VarPatternNode* op) override {}
 
-    void VisitDFPattern_(const WildcardPatternNode* op) override {}
+    void VisitDFPattern_(const WildcardPatternNode* op) override {
+      if (op->pattern) {
+        auto node = graph_->item_to_node(GetRef<WildcardPattern>(op));
+        AddOutput(op->pattern.value(), node);
+      }
+    }
 
     std::unique_ptr<IndexedGraph<DFPattern>> graph_;
   };

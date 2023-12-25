@@ -729,7 +729,7 @@ def InjectConv2DTransposeSkip():
 
         def _do_fold(op):
             if _match_pragma(op, "conv2d_transpose_gemm"):
-                is_init = ".init" in str(op)
+                is_init = "_init" in str(op)
                 tvm.tir.stmt_functor.post_order_visit(op, _find_basics)
 
                 if is_init:
@@ -988,7 +988,7 @@ def InjectALUIntrin():
                         rhs = loop_body.value.args[1]
                     else:
                         raise RuntimeError(
-                            "Function call not recognized %s" % (loop_body.value.name)
+                            "Function call not recognized %s" % (loop_body.value.op.name)
                         )
                 elif isinstance(loop_body.value, tvm.tir.BufferLoad):
                     alu_opcode = env.dev.ALU_OPCODE_SHR

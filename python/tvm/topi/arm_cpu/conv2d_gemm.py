@@ -18,6 +18,7 @@
 # pylint: disable=unused-argument, redefined-builtin
 """GEMM Convolution schedule on ARM"""
 import tvm
+from tvm.target import Target
 from tvm import te
 from tvm.topi import nn
 from tvm.autotvm.task.space import AnnotateEntity, ReorderEntity, OtherOptionEntity
@@ -29,10 +30,9 @@ from .tensor_intrin import (
     gemm_acc_nx16_int8_int8_int32,
     gemm_acc_2x2_int8_int8_int32,
 )
-from .arm_utils import is_aarch64_arm, is_dotprod_available, is_mmla_available
 
 
-def configure_knobs(cfg, M, K):
+def configure_knobs(cfg, M, K, target):
     """Configure auto-tuning knobs for the interleaved strategy"""
 
     x, y = cfg.axis(M // 4), cfg.axis(K // 16)
@@ -48,7 +48,7 @@ def configure_knobs(cfg, M, K):
         cfg["reorder_gemm"] = ReorderEntity([0, 1])
         cfg["A_interleaved_unroll_vec"] = AnnotateEntity(["unroll", "vec"])
 
-    if not is_dotprod_available():
+    if not target.features.has_dotprod:
         cfg.define_knob("gemm_quantized_unroll", [True, False])
         if cfg.is_fallback:
             cfg["gemm_quantized_unroll"] = OtherOptionEntity(False)
@@ -133,12 +133,13 @@ def compute_conv2d_gemm_without_weight_transform(
     # - Conv2DGemmWeightTransformRel in src/relay/op/nn/convolution.h
     # In order to have more information
     #
-    if is_mmla_available():
+    target = Target.current(allow_none=False)
+    if target.features.has_matmul_i8:
         # If smmla/ummla is enabled, we are loading 8 rows from A. Each row
         # will contain 8 elements
         tile_rows_A = 8
         tile_cols_A = 8
-    elif is_dotprod_available() and interleave_A:
+    elif target.features.has_dotprod and interleave_A:
         # If dot product has been enabled, and we are interleaving A
         # tile size should be 8x4
         tile_rows_A = 8
@@ -165,15 +166,17 @@ def compute_conv2d_gemm_without_weight_transform(
     pad_before = (0, 0, 0)
     pad_after = (0, pad_M, pad_K)
 
-    if pad_M != 0 or pad_K != 0:
-        A = nn.pad(A, pad_before=pad_before, pad_after=pad_after, name="A_padded")
+    if pad_K != 0:
+        A = nn.pad(A, pad_before=pad_before, pad_after=pad_after, name="A_padded_K")
+    elif pad_M != 0:
+        A = nn.pad(A, pad_before=pad_before, pad_after=pad_after, name="A_padded_M")
 
     idxm = tvm.tir.indexmod
     k = te.reduce_axis((0, K_padded), "k")
 
     if interleave_A:
         # Configuration space
-        configure_knobs(cfg, M_padded, K_padded)
+        configure_knobs(cfg, M_padded, K_padded, target)
 
         # Pack the input data
         A_interleaved = te.compute(
@@ -181,7 +184,8 @@ def compute_conv2d_gemm_without_weight_transform(
             lambda b, x, y, z, w: A[b, z + tile_rows_A * x, w + tile_cols_A * y],
             name="A_interleaved",
         )
-        if is_mmla_available():
+        target = Target.current(allow_none=False)
+        if target.features.has_matmul_i8:
             # Execute GEMM. In the case of mmla, we need to enforce the tiling
             # from the compute. This is because mmla is doing a tiled computation
             # as well. So we have a big 8x12 tile, with small 2x2 sub-tiles
@@ -209,18 +213,45 @@ def compute_conv2d_gemm_without_weight_transform(
                 ),
                 name="C_interleaved",
             )
+            # Ensure the padding needed for tensorize does not get removed during tir passes
+            # by adding a dummy reference to the specific padded area of the result
+            zero = (
+                tvm.tir.const(1, C_interleaved.dtype)
+                * C_interleaved[
+                    batches - 1,
+                    M // tile_rows_A,
+                    N_transformed - 1,
+                    idxm(M, tile_rows_A) // 2,
+                    tile_rows_B // 2 - 1,
+                    1,
+                    1,
+                ]
+                - tvm.tir.const(1, C_interleaved.dtype)
+                * C_interleaved[
+                    batches - 1,
+                    M // tile_rows_A,
+                    N_transformed - 1,
+                    idxm(M, tile_rows_A) // 2,
+                    tile_rows_B // 2 - 1,
+                    1,
+                    1,
+                ]
+            )
             # Unpack the result
             C = te.compute(
                 (batches, M, N),
-                lambda b, x, y: C_interleaved[
-                    b,
-                    x // tile_rows_A,
-                    y // tile_rows_B,
-                    idxm(x, tile_rows_A) // 2,
-                    idxm(y, tile_rows_B) // 2,
-                    idxm(idxm(x, tile_rows_A), 2),
-                    idxm(idxm(y, tile_rows_B), 2),
-                ].astype(out_dtype),
+                lambda b, x, y: (
+                    C_interleaved[
+                        b,
+                        x // tile_rows_A,
+                        y // tile_rows_B,
+                        idxm(x, tile_rows_A) // 2,
+                        idxm(y, tile_rows_B) // 2,
+                        idxm(idxm(x, tile_rows_A), 2),
+                        idxm(idxm(y, tile_rows_B), 2),
+                    ]
+                    + zero
+                ).astype(out_dtype),
                 name="C",
             )
         else:
@@ -287,7 +318,7 @@ def schedule_conv2d_gemm_interleaved(cfg, s, out, final_out):
 
     # Input transform
     A_interleaved_input = A_interleaved.op.input_tensors[0]
-    if A_interleaved_input.op.name == "A_padded":
+    if A_interleaved_input.op.name == "A_padded_K" or A_interleaved_input.op.name == "A_padded_M":
         s[A_interleaved_input].compute_at(s[A_interleaved], A_interleaved.op.axis[3])
         s[A_interleaved_input].vectorize(A_interleaved_input.op.axis[2])
         s[A_interleaved_input].compute_inline()
@@ -297,7 +328,12 @@ def schedule_conv2d_gemm_interleaved(cfg, s, out, final_out):
 
     b, m, n = data_im2col.op.axis
     if data_im2col.op.name == "data_im2col":
-        n_outer, n_inner = s[data_im2col].split(n, 16)
+        n_size = data_im2col.shape[2]
+        if n_size % 16 == 0:
+            split_factor = 16
+        else:
+            split_factor = 8
+        n_outer, n_inner = s[data_im2col].split(n, split_factor)
         s[data_im2col].unroll(n_outer)
         s[data_im2col].vectorize(n_inner)
         b_m_fused = s[data_im2col].fuse(b, m)
@@ -323,7 +359,8 @@ def schedule_conv2d_gemm_interleaved(cfg, s, out, final_out):
     k = C_interleaved.op.reduce_axis[0]
     _, M, N = C.shape
     if in_type in ["int8", "uint8"]:
-        if is_mmla_available():
+        target = Target.current(allow_none=False)
+        if target.features.has_matmul_i8:
             gemm_acc = gemm_acc_2x2_int8_int8_int32(in_type)
             xi_inner, yi_inner = C_interleaved.op.axis[-2:]
             k_outer, k_inner = s[C_interleaved].split(k, 8)
@@ -333,7 +370,7 @@ def schedule_conv2d_gemm_interleaved(cfg, s, out, final_out):
             s[C_interleaved].tensorize(xi_inner, gemm_acc)
             s[C_interleaved].unroll(xi)
             s[C_interleaved].unroll(yi)
-        elif is_dotprod_available():
+        elif target.features.has_dotprod:
             gemm_acc = gemm_acc_4x4_int8_int8_int32(in_type)
             xi_outer, yi_outer, xi_inner, yi_inner = s[C_interleaved].tile(
                 xi, yi, x_factor=8, y_factor=4
@@ -354,7 +391,7 @@ def schedule_conv2d_gemm_interleaved(cfg, s, out, final_out):
             s[C_interleaved].tensorize(xi_inner_inner, gemm_acc)
             s[C_interleaved].unroll(xi_inner_outer)
 
-        elif is_aarch64_arm():
+        elif target.features.has_asimd:
             s[C_interleaved].reorder(yi, xi)
             K = A_interleaved_input.shape[2]
             assert in_type in ["int8", "uint8"], "Only int8 and uint8 gemm are supported"
@@ -381,7 +418,8 @@ def schedule_conv2d_gemm_native(cfg, s, out, final_out):
     b, x, y = C.op.axis
     (k,) = C.op.reduce_axis
     k_outer, k_inner = s[C].split(k, 16)
-    x_outer, y_outer, x_inner, y_inner = s[C].tile(x, y, x_factor=4, y_factor=16)
+    y_tile_size = 16
+    x_outer, y_outer, x_inner, y_inner = s[C].tile(x, y, x_factor=4, y_factor=y_tile_size)
     s[C].reorder(b, x_outer, y_outer, k_outer, x_inner, y_inner, k_inner)
     gemm_acc = gemm_acc_nx16_int8_int8_int32(in_type, rows=1)
     s[C].unroll(x_inner)
@@ -389,7 +427,7 @@ def schedule_conv2d_gemm_native(cfg, s, out, final_out):
     s[C].parallel(x_outer)
 
     # Input transform
-    if A.op.name == "A_padded":
+    if A.op.name == "A_padded_K" or A.op.name == "A_padded_M":
         padding_A = True
         data_im2col = A.op.input_tensors[0]
     else:
@@ -398,12 +436,32 @@ def schedule_conv2d_gemm_native(cfg, s, out, final_out):
 
     b, m, n = data_im2col.op.axis
     if data_im2col.op.name == "data_im2col":
-        n_outer, n_inner = s[data_im2col].split(n, 16)
+        # Either only pad_K or both pad_K and pad_M applied
+        if A.op.name == "A_padded_K":
+            s[data_im2col].compute_at(s[A], A.op.axis[1])
+            s[A].parallel(A.op.axis[1])
+        # Only pad_M applied
+        elif A.op.name == "A_padded_M":
+            s[data_im2col].parallel(m)
+            s[A].parallel(A.op.axis[1])
+        # No padding
+        else:
+            s[data_im2col].parallel(m)
+
+        split_factor = 16
+        n_size = data_im2col.shape[2]
+        if n_size % split_factor != 0:
+            # Split by kernel area (KH * KW) to ensure proper vectorization
+            ic = data_im2col.op.input_tensors[0].shape[3]
+            split_factor = n_size // ic
+
+        n_outer, n_inner = s[data_im2col].split(n, split_factor)
         s[data_im2col].unroll(n_outer)
         s[data_im2col].vectorize(n_inner)
-        s[data_im2col].parallel(m)
     elif padding_A:
         s[data_im2col].compute_inline()
+        _, n_inner = s[A].split(A.op.axis[2], y_tile_size)
+        s[A].vectorize(n_inner)
         s[A].compute_at(s[C], x_inner)
     else:
         s[data_im2col].compute_at(s[C], x_inner)

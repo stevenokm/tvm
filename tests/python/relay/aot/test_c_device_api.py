@@ -21,12 +21,11 @@ from collections import OrderedDict
 
 import numpy as np
 import pytest
-
 import tvm.testing
 from tvm import relay
 from tvm.ir.module import IRModule
-from tvm.testing.aot import AOTTestModel, generate_ref_data, compile_models
 from tvm.micro.testing.aot_test_utils import AOT_DEFAULT_RUNNER
+from tvm.testing.aot import AOTTestModel, compile_models, generate_ref_data
 
 
 @pytest.fixture(name="device_api_main_func")
@@ -40,9 +39,12 @@ def fixture_device_api_main_func():
     # pylint: disable=import-outside-toplevel
     import tensorflow as tf
     import tflite.Model
-
-    from tests.python.contrib.test_ethosu.infra import create_test_runner, generate_ref_data_tflite
     from tvm.relay.op.contrib.ethosu import partition_for_ethosu
+
+    from tests.python.contrib.test_ethosu.infra import (
+        create_test_runner,
+        generate_ref_data_tflite,
+    )
 
     # pylint: enable=import-outside-toplevel
 
@@ -141,42 +143,46 @@ def test_device_api_hooks_unpacked_api(device_api_main_func):
 
     # Activate Device
     assert (
-        str(main_func.body[0])
-        == "tir.tvm_check_return(0, -1, tir.call_extern("
-        + '"TVMDeviceEthosUActivate",'
-        + " device_context_ethos_u))\n"
+        str(main_func.body[0].value)
+        == "T.tvm_check_return(0, -1, T.call_extern("
+        + '"int32",'
+        + ' "TVMDeviceEthosUActivate",'
+        + " device_context_ethos_u))"
     )
     # Open Device
     print("main func", repr(main_func.body))
     assert (
-        str(main_func.body[1][0][0][0])
-        == "tir.tvm_check_return(0, -1, tir.call_extern("
-        + '"TVMDeviceEthosUOpen",'
-        + " device_context_ethos_u))\n"
+        str(main_func.body[1].value)
+        == "T.tvm_check_return(0, -1, T.call_extern("
+        + '"int32",'
+        + ' "TVMDeviceEthosUOpen",'
+        + " device_context_ethos_u))"
     )
     # Device Call
     # We dont need to check exact input and output var names in this test.
     # Hence, using a regex to cover any legal I/O name.
     regex = re.compile(
-        r"tir\.tvm_check_return\("
+        r"T\.tvm_check_return\("
         r"0, -1, "
-        r'tir\.call_extern\("tvmgen_default_ethos_u_main_0", '
+        r'T\.call_extern\("int32", "tvmgen_default_ethos_u_main_0", '
         r"\w+, \w+, device_context_ethos_u\)\)"
     )
-    assert regex.match(str(main_func.body[1][0][0][1]))
+    assert regex.match(str(main_func.body[2].value))
     # Close Device
     assert (
-        str(main_func.body[1][0][0][2])
-        == "tir.tvm_check_return(0, -1, tir.call_extern("
-        + '"TVMDeviceEthosUClose",'
-        + " device_context_ethos_u))\n"
+        str(main_func.body[3].value)
+        == "T.tvm_check_return(0, -1, T.call_extern("
+        + '"int32",'
+        + ' "TVMDeviceEthosUClose",'
+        + " device_context_ethos_u))"
     )
     # Deactivate Device
     assert (
-        str(str(main_func.body[2]))
-        == "tir.tvm_check_return(0, -1, tir.call_extern("
-        + '"TVMDeviceEthosUDeactivate",'
-        + " device_context_ethos_u))\n"
+        str(str(main_func.body[4].value))
+        == "T.tvm_check_return(0, -1, T.call_extern("
+        + '"int32",'
+        + ' "TVMDeviceEthosUDeactivate",'
+        + " device_context_ethos_u))"
     )
 
 
@@ -236,11 +242,12 @@ def test_without_device_api_unpacked_api(non_device_api_main_func):
     """Test a graph without the Device API with the unpacked internal calls"""
 
     main_func = non_device_api_main_func(interface_api="c", use_unpacked_api=True)
+    body = main_func.body.value
     assert (
-        str(main_func.body)
-        == "tir.tvm_check_return(0, -1, tir.call_extern("
+        repr(body)
+        == 'T.tvm_check_return(0, -1, T.call_extern("int32", '
         + '"tvmgen_default_fused_multiply",'
-        + " x_buffer_var, y_buffer_var, output_buffer_var))\n"
+        + " x_buffer_var, y_buffer_var, output_buffer_var))"
     )
 
 
@@ -249,12 +256,16 @@ def test_without_device_api_packed_api(non_device_api_main_func):
 
     main_func = non_device_api_main_func(interface_api="packed", use_unpacked_api=False)
 
-    assert str(main_func.body) == (
-        'tir.tvm_call_cpacked("tvmgen_default_fused_multiply", '
-        "tir.tvm_stack_make_array(x_buffer_var, tir.tvm_stack_make_shape(10, 10), tir.reinterpret((uint64)0), (uint32)2, float32(0), 0), "  # pylint: disable=line-too-long
-        "tir.tvm_stack_make_array(y_buffer_var, tir.tvm_stack_make_shape(1, 10), tir.reinterpret((uint64)0), (uint32)2, float32(0), 0), "  # pylint: disable=line-too-long
-        "tir.tvm_stack_make_array(output_buffer_var, tir.tvm_stack_make_shape(10, 10), tir.reinterpret((uint64)0), (uint32)2, float32(0), 0), "  # pylint: disable=line-too-long
-        "tir.reinterpret((uint64)0))\n"
+    body = main_func.body.value
+    assert repr(body) == (
+        'T.call_cpacked("tvmgen_default_fused_multiply", '
+        "T.tvm_stack_make_array(x_buffer_var, T.tvm_stack_make_shape(10, 10), "
+        'T.reinterpret("handle", T.uint64(0)), T.uint32(2), T.Cast("float32", 0), 0), '
+        "T.tvm_stack_make_array(y_buffer_var, T.tvm_stack_make_shape(1, 10), "
+        'T.reinterpret("handle", T.uint64(0)), T.uint32(2), T.Cast("float32", 0), 0), '
+        "T.tvm_stack_make_array(output_buffer_var, T.tvm_stack_make_shape(10, 10), "
+        'T.reinterpret("handle", T.uint64(0)), T.uint32(2), T.Cast("float32", 0), 0), '
+        'T.reinterpret("handle", T.uint64(0)))'
     )
 
 

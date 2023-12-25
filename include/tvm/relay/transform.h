@@ -48,6 +48,18 @@ using PassContext = tvm::transform::PassContext;
 using PassContextNode = tvm::transform::PassContextNode;
 using Sequential = tvm::transform::Sequential;
 
+/*!
+ * \brief RelayToTIR tvm::transform::Pass specific to a TargetKind
+ *
+ * Called before the default lowering passes.
+ *
+ * \param mod The module that an optimization pass runs on.
+ * \param pass_ctx The pass context that can provide information for the optimization.
+ *
+ * \return The transformed module.
+ */
+using FTVMRelayToTIR = tvm::transform::Pass;
+
 /*
  * \brief Create a function pass.
  *
@@ -120,12 +132,15 @@ TVM_DLL Pass FoldConstant(bool fold_qnn = false);
 /*!
  * \brief Split function with huge number of arguments to smaller pieces.
  *
+ * \param max_function_args Maximum number of function arguments. If it equals 0 then SplitArgs
+ *                          shouldn't split the function.
+ *
  * \return The pass.
  */
-TVM_DLL Pass SplitArgs(int max_function_args);
+TVM_DLL Pass SplitArgs(uint64_t max_function_args);
 
 /*!
- * \brief Fuse operations into expr into seperate functions.
+ * \brief Fuse operations into expr into separate functions.
  *
  * \param fuse_opt_level Optimization level. If it is -1 it will be inferred from pass context.
  *
@@ -468,6 +483,13 @@ TVM_DLL Pass RemoveUnusedFunctions(Array<runtime::String> entry_functions);
 TVM_DLL Pass SimplifyExpr();
 
 /*!
+ * \brief Stripped down version of SimplifyExpr which is run after AlterOpLayout.
+ *
+ * \return The pass.
+ */
+TVM_DLL Pass SimplifyExprPostAlterOp();
+
+/*!
  * \brief Run any custom passes registered under "RelayToTIR" attributes on TargetKinds.
  *
  * This pass looks for inline, let-bound or global functions which have a "Compiler" attribute.
@@ -482,7 +504,7 @@ TVM_DLL Pass SimplifyExpr();
  * A typical custom pass will:
  *  - Find calls to "Compiler" attributes functions with matching compiler name.
  *  - Lower those function to TIR PrimFuncs.
- *  - Bind those functions into the IRModule under the the functions' "global_symbol" attribute.
+ *  - Bind those functions into the IRModule under the functions' "global_symbol" attribute.
  *  - Replace all calls to those functions with 'call_lowered' to the matching global.
  * Care should be taken to handle multiple calls to the same function.
  * See src/relay/backend/contrib/example_target_hooks/relay_to_tir.cc for an example custom pass.
@@ -568,6 +590,33 @@ TVM_DLL Pass FlattenAtrousConv();
  * pass isn't applied where dynamic shapes may be input.
  */
 TVM_DLL Pass AnnotateUsedMemory();
+
+/*!
+ * \brief Captures the post-dfs index and dominator post-dfs index of (most) expression nodes in
+ * their span, in the form "index:<post-dfs index>:<dominator post-dfs index>". This is useful for
+ * debugging since a) it helps identify pretty-printed sub-expressions within the overall model
+ * and b) the indexes are heavily used by Collage for its compact representation of sub-graphs.
+ *
+ * Note that Op and Constructor nodes are not changed even though they are assigned an
+ * post-dfs index.
+ */
+TVM_DLL Pass CapturePostDfsIndexInSpans();
+
+/*!
+ * \brief Calls device dependent memory scope analysis pass, collects mapping of desirable
+ * expr->memory_scope and annotates expressions by VirtualDevice with required memory_scope
+ */
+TVM_DLL Pass AnnotateMemoryScope();
+
+/*!
+ * \brief Removes non-fused reshapes after lowering the graph.
+ * InferType() cannot be invoked after calling this pass as it removes reshapes from the call
+ * graph. Many targets only need buffer addresses irrespective of the shapes of them. This makes
+ * reshapes symbolic once the graph has been lowered. Reshape removal results into smaller code
+ * size and reduced buffer allocations. It opens up opportunities of operator fusion in the target
+ * backend. Thus, consequently, it improves the performance of the inference.
+ */
+TVM_DLL Pass RemoveStandaloneReshapes();
 
 }  // namespace transform
 
@@ -682,6 +731,10 @@ TVM_DLL Function UnCPS(const Function& f);
  * \return the deduplicated expression.
  */
 TVM_DLL Expr DeDup(const Expr& e);
+
+namespace legalize {
+TVM_DLL Expr Legalize(const Expr& expr, const std::string& legalize_map_attr_name);
+}  // namespace legalize
 
 }  // namespace relay
 }  // namespace tvm

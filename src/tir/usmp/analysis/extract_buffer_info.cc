@@ -92,7 +92,11 @@ class BufferInfoExtractor : public StmtExprVisitor {
   /*!
    * \brief Records the order of calls in the main for stability.
    */
-  std::set<Call> call_order_;
+  std::vector<Call> call_order_;
+  /*!
+   * \brief Lookup to avoid adding duplicates to `call_order_`.
+   */
+  std::unordered_set<Call, ObjectPtrHash, ObjectPtrEqual> call_order_contents_;
   /*!
    * \brief Records first access in-terms of Stmts to each buffer per call
    *
@@ -369,11 +373,11 @@ void BufferInfoExtractor::VisitStmt_(const ForNode* op) {
       update_call = ai.call;
     }
     if (scope_stack_.top().initial_stmt_of_the_nested_loops->value <
-        buffer_info_start_stmt_idx_[update_call][allocate]) {
+        buffer_info_start_stmt_idx_[update_call][allocate].IntValue()) {
       buffer_info_start_stmt_idx_[update_call].Set(
           allocate, scope_stack_.top().initial_stmt_of_the_nested_loops->value);
     }
-    if (current_stmt_idx_ > buffer_info_end_stmt_idx_[update_call][allocate]) {
+    if (current_stmt_idx_ > buffer_info_end_stmt_idx_[update_call][allocate].IntValue()) {
       buffer_info_end_stmt_idx_[update_call].Set(allocate, current_stmt_idx_);
     }
   }
@@ -425,15 +429,17 @@ void BufferInfoExtractor::VisitExpr_(const VarNode* op) {
 
 Array<Var> static GetMatchedBuffers(const PrimFunc& func) {
   Array<Var> buffer_vars;
-  for (unsigned int i = 0; i < func->params.size() - 1; i++) {
-    Var param = func->params[i];
-    buffer_vars.push_back(func->buffer_map[param]->data);
-  }
-  Var last_param = func->params.back();
-  // Checks whether last var is present in the buffer map
-  // because it could be the resource handle
-  if (func->buffer_map.find(last_param) != func->buffer_map.end()) {
-    buffer_vars.push_back(func->buffer_map[last_param]->data);
+  if (func->params.size() > 0) {
+    for (unsigned int i = 0; i < func->params.size() - 1; i++) {
+      Var param = func->params[i];
+      buffer_vars.push_back(func->buffer_map[param]->data);
+    }
+    Var last_param = func->params.back();
+    // Checks whether last var is present in the buffer map
+    // because it could be the resource handle
+    if (func->buffer_map.find(last_param) != func->buffer_map.end()) {
+      buffer_vars.push_back(func->buffer_map[last_param]->data);
+    }
   }
   return buffer_vars;
 }
@@ -448,12 +454,7 @@ void BufferInfoExtractor::UpdateAliases(const Array<PrimExpr>& args, const PrimF
     // If tir.allocates are passed in to functions
     // The function params are re-directed to point
     // to the original allocate
-    if (arg->IsInstance<LoadNode>()) {
-      auto load = Downcast<Load>(arg);
-      if (allocate_infos.count(load->buffer_var)) {
-        allocate_infos[param_buf] = allocate_infos[load->buffer_var];
-      }
-    } else if (arg->IsInstance<VarNode>()) {
+    if (arg->IsInstance<VarNode>()) {
       auto var = Downcast<Var>(arg);
       if (allocate_infos.count(var)) {
         allocate_infos[param_buf] = allocate_infos[var];
@@ -469,7 +470,10 @@ void BufferInfoExtractor::VisitPrimFunc(const PrimFunc& func, const Call& call) 
                scope_stack_.top().allocate_nodes,
                scope_stack_.top().allocate_const_nodes,
                scope_stack_.top().initial_stmt_of_the_nested_loops};
-  call_order_.insert(call);
+  if (call_order_contents_.count(call) == 0) {
+    call_order_contents_.insert(call);
+    call_order_.push_back(call);
+  }
   scope_stack_.push(si);
   this->VisitStmt(func->body);
   scope_stack_.pop();
@@ -518,7 +522,7 @@ BufferInfoAnalysis BufferInfoExtractor::operator()(const PrimFunc& main_func) {
         LivenessEvent le_event_start;
         le_event_start.buffer_info = buffer_info;
         le_event_start.le_type = START;
-        le_event_start.tick = buffer_info_starts[allocate];
+        le_event_start.tick = buffer_info_starts[allocate].IntValue();
         le_events_timeline.push_back(le_event_start);
       }
     }
@@ -529,7 +533,7 @@ BufferInfoAnalysis BufferInfoExtractor::operator()(const PrimFunc& main_func) {
         LivenessEvent le_event_end;
         le_event_end.buffer_info = buffer_info;
         le_event_end.le_type = END;
-        le_event_end.tick = buffer_info_ends[allocate];
+        le_event_end.tick = buffer_info_ends[allocate].IntValue();
         le_events_timeline.push_back(le_event_end);
       }
     }
@@ -562,13 +566,13 @@ BufferInfoAnalysis BufferInfoExtractor::operator()(const PrimFunc& main_func) {
           le_event.buffer_info->conflicts.push_back(open_buffer_info);
         }
       }
-      open_set_size += le_event.buffer_info->size_bytes;
+      open_set_size += le_event.buffer_info->size_bytes.IntValue();
       if (open_set_size > max_open_set_size) {
         max_open_set_size = open_set_size;
       }
       open_set.insert(le_event.buffer_info);
     } else {
-      open_set_size -= le_event.buffer_info->size_bytes;
+      open_set_size -= le_event.buffer_info->size_bytes.IntValue();
       open_set.erase(le_event.buffer_info);
     }
   }

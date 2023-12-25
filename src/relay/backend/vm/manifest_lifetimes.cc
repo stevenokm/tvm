@@ -167,7 +167,9 @@ class AliasEliminator : public MixedModeMutator {
           if (copy_props.src_virtual_device->device_type() ==
                   copy_props.dst_virtual_device->device_type() &&
               copy_props.src_virtual_device->virtual_device_id ==
-                  copy_props.dst_virtual_device->virtual_device_id) {
+                  copy_props.dst_virtual_device->virtual_device_id &&
+              copy_props.src_virtual_device->memory_scope ==
+                  copy_props.dst_virtual_device->memory_scope) {
             Expr to_copy = Downcast<Call>(unwrapped)->args[0];
             if (const VarNode* alias_of_n = to_copy.as<VarNode>()) {
               alias_[var] = Downcast<Var>(VisitExpr_(alias_of_n));
@@ -201,7 +203,7 @@ class AliasEliminator : public MixedModeMutator {
     if (alias_.count(var)) {
       return alias_[var];
     }
-    return var;
+    return std::move(var);
   }
 
   Expr VisitExpr_(const FunctionNode* func_node) override {

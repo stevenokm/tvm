@@ -18,11 +18,12 @@
 
 import tvm
 from tvm.script import tir as T
+from tvm.tir.schedule.testing import assert_structural_equal_ignore_global_symbol
 
 
 @T.prim_func
 def matmul(a: T.handle, b: T.handle, c: T.handle, n: T.int32) -> None:
-    m = T.var("int32")
+    m = T.int32()
     A = T.match_buffer(a, [m, n])
     B = T.match_buffer(b, [m, n])
     C = T.match_buffer(c, [m, m])
@@ -51,7 +52,7 @@ def matmul_128(a: T.handle, b: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def matmul_m_128(a: T.handle, b: T.handle, c: T.handle) -> None:
-    m = T.var("int32")
+    m = T.int32()
     A = T.match_buffer(a, [m, 128])
     B = T.match_buffer(b, [m, 128])
     C = T.match_buffer(c, [m, m])
@@ -66,8 +67,8 @@ def matmul_m_128(a: T.handle, b: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def matmul_m_8x(a: T.handle, b: T.handle, c: T.handle) -> None:
-    x = T.var("int32")
-    m = T.var("int32")
+    x = T.int32()
+    m = T.int32()
     A = T.match_buffer(a, [m, x * 8])
     B = T.match_buffer(b, [m, x * 8])
     C = T.match_buffer(c, [m, m])
@@ -82,8 +83,8 @@ def matmul_m_8x(a: T.handle, b: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def element_wise(a: T.handle, c: T.handle) -> None:
-    m = T.var("int32")
-    n = T.var("int32")
+    m = T.int32()
+    n = T.int32()
     A = T.match_buffer(a, (m, n), "float32")
     C = T.match_buffer(c, (m, n), "float32")
 
@@ -119,7 +120,7 @@ def element_wise_128_64(a: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def element_wise_128_n(a: T.handle, c: T.handle) -> None:
-    n = T.var("int32")
+    n = T.int32()
     A = T.match_buffer(a, (128, n), "float32")
     C = T.match_buffer(c, (128, n), "float32")
     B = T.alloc_buffer((128, n), "float32")
@@ -170,7 +171,7 @@ def mem_copy_m_n_p_n(a: T.handle, b: T.handle, m: T.int32, n: T.int32, p: T.int3
 
 @T.prim_func
 def param_in_arith_exprs(a: T.handle, b: T.handle) -> None:
-    n = T.var("int32")
+    n = T.int32()
     A = T.match_buffer(a, [n // 8, 8], "int32")
     B = T.match_buffer(b, [n], "int32")
     for i in range(n - 1):
@@ -181,7 +182,7 @@ def param_in_arith_exprs(a: T.handle, b: T.handle) -> None:
 
 @T.prim_func
 def param_in_arith_exprs_n_16(a: T.handle, b: T.handle) -> None:
-    n = T.var("int32")
+    n = T.int32()
     A = T.match_buffer(a, [2, 8], "int32")
     B = T.match_buffer(b, [16], "int32")
     for i in range(15):
@@ -199,13 +200,13 @@ def test_specialize_matmul():
     a, _, _, n = matmul.params
     # fully specialized
     func = matmul.specialize({a: tvm.tir.decl_buffer((128, 128))})
-    tvm.ir.assert_structural_equal(func, matmul_128)
+    assert_structural_equal_ignore_global_symbol(func, matmul_128)
     # partially specialized
     func = matmul.specialize({n: 128})
-    tvm.ir.assert_structural_equal(func, matmul_m_128)
+    assert_structural_equal_ignore_global_symbol(func, matmul_m_128)
     # symbolic specialized
     func = matmul.specialize({n: tvm.tir.Var("x", "int32") * 8})
-    tvm.ir.assert_structural_equal(func, matmul_m_8x)
+    assert_structural_equal_ignore_global_symbol(func, matmul_m_8x)
 
 
 def test_specialize_elemwise():
@@ -213,22 +214,22 @@ def test_specialize_elemwise():
     C = element_wise.buffer_map[c]
     # fully specialized
     func = element_wise.specialize({a: tvm.tir.decl_buffer((128, 64))})
-    tvm.ir.assert_structural_equal(func, element_wise_128_64)
+    assert_structural_equal_ignore_global_symbol(func, element_wise_128_64)
     # partially specialized
     func = element_wise.specialize({c: tvm.tir.decl_buffer((128, C.shape[1]))})
-    tvm.ir.assert_structural_equal(func, element_wise_128_n)
+    assert_structural_equal_ignore_global_symbol(func, element_wise_128_n)
 
 
 def test_specialize_mem_copy():
     a, _, m, n, p, q = mem_copy.params
     # fully specialized
     func = mem_copy.specialize({a: tvm.tir.decl_buffer((16, 16), strides=[8, 1], elem_offset=4)})
-    tvm.ir.assert_structural_equal(func, mem_copy_16_16_8_4)
+    assert_structural_equal_ignore_global_symbol(func, mem_copy_16_16_8_4)
     func = mem_copy.specialize({n: 16, m: 16, p: 8, q: 4})
-    tvm.ir.assert_structural_equal(func, mem_copy_16_16_8_4)
+    assert_structural_equal_ignore_global_symbol(func, mem_copy_16_16_8_4)
     # partially specialized
     func = mem_copy.specialize({q: n})
-    tvm.ir.assert_structural_equal(func, mem_copy_m_n_p_n)
+    assert_structural_equal_ignore_global_symbol(func, mem_copy_m_n_p_n)
 
 
 def test_specialize_recursive_load():
@@ -239,7 +240,7 @@ def test_specialize_recursive_load():
 def test_specialize_with_const_folding():
     b = param_in_arith_exprs.params[1]
     func = param_in_arith_exprs.specialize({b: tvm.tir.decl_buffer([16])})
-    tvm.ir.assert_structural_equal(func, param_in_arith_exprs_n_16)
+    assert_structural_equal_ignore_global_symbol(func, param_in_arith_exprs_n_16)
 
 
 if __name__ == "__main__":

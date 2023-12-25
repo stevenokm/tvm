@@ -18,11 +18,13 @@
 import logging
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Union
+import subprocess
 
 import tvm
 
 from ...contrib.popen_pool import PopenPoolExecutor
 from ...runtime import Device, Module
+from ..logging import get_logger
 from ..profiler import Profiler
 from ..utils import derived_object, get_global_func_with_default_on_worker
 from .config import EvaluatorConfig
@@ -34,7 +36,7 @@ from .utils import (
     run_evaluator_common,
 )
 
-logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger = get_logger(__name__)  # pylint: disable=invalid-name
 
 
 T_ALLOC_ARGUMENT = Callable[  # pylint: disable=invalid-name
@@ -272,11 +274,16 @@ class LocalRunner(PyRunner):
         self.f_run_evaluator = f_run_evaluator
         self.f_cleanup = f_cleanup
 
+        err_path = subprocess.DEVNULL
+        if logger.root.level <= logging.DEBUG:
+            err_path = subprocess.STDOUT
+
         logger.info("LocalRunner: max_workers = 1")
         self.pool = PopenPoolExecutor(
             max_workers=1,  # one local worker
             timeout=timeout_sec,
             initializer=initializer,
+            stderr=err_path,  # suppress the stderr output
         )
         self._sanity_check()
 

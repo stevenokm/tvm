@@ -39,6 +39,7 @@ def test_ethosu_identity_matcher():
         ofm_scale=1,
         ofm_zero_point=0,
         activation="NONE",
+        rounding_mode="TFL",
     )
 
     length = len(ifm.shape)
@@ -55,4 +56,4 @@ def test_ethosu_identity_matcher():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    tvm.testing.main()

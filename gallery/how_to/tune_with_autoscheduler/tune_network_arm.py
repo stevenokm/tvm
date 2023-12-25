@@ -46,6 +46,7 @@ get it to run, you will need to wrap the body of this tutorial in a :code:`if
 __name__ == "__main__":` block.
 """
 
+
 import numpy as np
 import os
 
@@ -330,7 +331,7 @@ def tune_and_evaluate():
         from tvm.contrib import ndk
 
         filename = "net.so"
-        lib.export_library(tmp.relpath(filename), ndk.create_shared)
+        lib.export_library(tmp.relpath(filename), fcompile=ndk.create_shared)
     else:
         filename = "net.tar"
         lib.export_library(tmp.relpath(filename))

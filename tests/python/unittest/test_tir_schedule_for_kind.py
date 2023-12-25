@@ -22,7 +22,10 @@ import tvm
 import tvm.testing
 from tvm import tir
 from tvm.script import tir as T
-from tvm.tir.schedule.testing import verify_trace_roundtrip
+from tvm.tir.schedule.testing import (
+    verify_trace_roundtrip,
+    assert_structural_equal_ignore_global_symbol,
+)
 
 # pylint: disable=no-member,invalid-name,unused-variable
 
@@ -279,9 +282,9 @@ def thread_bound_block_inside_init(a: T.handle, b: T.handle) -> None:
 
 @T.prim_func
 def decomposed_gemm(
-    A: T.Buffer[(16, 16), "float32"],
-    B: T.Buffer[(16, 16), "float32"],
-    C: T.Buffer[(16, 16), "float32"],
+    A: T.Buffer((16, 16), "float32"),
+    B: T.Buffer((16, 16), "float32"),
+    C: T.Buffer((16, 16), "float32"),
 ):
     local = T.alloc_buffer((16, 16), "float32")
     for i, j in T.grid(4, 4):
@@ -305,9 +308,9 @@ def decomposed_gemm(
 
 @T.prim_func
 def decomposed_gemm_after_vectorize(
-    A: T.Buffer[(16, 16), "float32"],
-    B: T.Buffer[(16, 16), "float32"],
-    C: T.Buffer[(16, 16), "float32"],
+    A: T.Buffer((16, 16), "float32"),
+    B: T.Buffer((16, 16), "float32"),
+    C: T.Buffer((16, 16), "float32"),
 ):
     local = T.alloc_buffer((16, 16), "float32")
     for i, j in T.grid(4, 4):
@@ -332,7 +335,7 @@ def decomposed_gemm_after_vectorize(
 
 @T.prim_func
 def nested_block_bind(
-    A: T.Buffer[(16, 16, 16, 16), "float32"], B: T.Buffer[(16, 16, 16), "float32"]
+    A: T.Buffer((16, 16, 16, 16), "float32"), B: T.Buffer((16, 16, 16), "float32")
 ):
     for i, j in T.grid(16, 16):
         with T.block("outer"):
@@ -347,7 +350,7 @@ def nested_block_bind(
 
 @T.prim_func
 def thread_bound_nested_block(
-    A: T.Buffer[(16, 16, 16, 16), "float32"], B: T.Buffer[(16, 16, 16), "float32"]
+    A: T.Buffer((16, 16, 16, 16), "float32"), B: T.Buffer((16, 16, 16), "float32")
 ) -> None:
     for i in T.serial(16):
         for j in T.thread_binding(16, thread="blockIdx.x"):
@@ -364,7 +367,7 @@ def thread_bound_nested_block(
 
 @T.prim_func
 def nested_block_bind_after_cache_read(
-    A: T.Buffer[(16, 16), "float32"], B: T.Buffer[(16,), "float32"]
+    A: T.Buffer((16, 16), "float32"), B: T.Buffer((16,), "float32")
 ) -> None:
     for i in T.serial(16):
         with T.block("outer"):
@@ -385,7 +388,7 @@ def nested_block_bind_after_cache_read(
 
 @T.prim_func
 def thread_bound_nested_block_after_cache_read(
-    A: T.Buffer[(16, 16), "float32"], B: T.Buffer[(16,), "float32"]
+    A: T.Buffer((16, 16), "float32"), B: T.Buffer((16,), "float32")
 ) -> None:
     for i in T.thread_binding(16, thread="blockIdx.x"):
         with T.block("outer"):
@@ -406,9 +409,9 @@ def thread_bound_nested_block_after_cache_read(
 
 @T.prim_func
 def decomposed_gemm_parallelize_init(
-    A: T.Buffer[(16, 16), "float32"],
-    B: T.Buffer[(16, 16), "float32"],
-    C: T.Buffer[(16, 16), "float32"],
+    A: T.Buffer((16, 16), "float32"),
+    B: T.Buffer((16, 16), "float32"),
+    C: T.Buffer((16, 16), "float32"),
 ) -> None:
     local = T.alloc_buffer([16, 16], dtype="float32")
     for i, j in T.grid(4, 4):
@@ -438,7 +441,7 @@ def decomposed_gemm_parallelize_init(
 
 
 @T.prim_func
-def scatter_compute(A: T.Buffer[(16,), "float32"], B: T.Buffer[(16,), "float32"]):
+def scatter_compute(A: T.Buffer((16,), "float32"), B: T.Buffer((16,), "float32")):
     for i in T.grid(8):
         with T.block("first_half"):
             vi = T.axis.spatial(16, 8 + i)
@@ -452,7 +455,7 @@ def scatter_compute(A: T.Buffer[(16,), "float32"], B: T.Buffer[(16,), "float32"]
 
 @T.prim_func
 def scatter_compute_parallelize(
-    A: T.Buffer[(16,), "float32"], B: T.Buffer[(16,), "float32"]
+    A: T.Buffer((16,), "float32"), B: T.Buffer((16,), "float32")
 ) -> None:
     # body
     # with T.block("root")
@@ -477,7 +480,7 @@ def test_parallel():
     s = tir.Schedule(element_wise, debug_mask="all")
     i, _ = s.get_loops(s.get_block("B"))
     s.parallel(i)
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_parallelized)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], element_wise_parallelized)
     verify_trace_roundtrip(s, mod=element_wise)
 
 
@@ -485,7 +488,9 @@ def test_parallel_predicate():
     s = tir.Schedule(element_wise_split_predicate, debug_mask="all")
     _, j, _ = s.get_loops(s.get_block("B"))
     s.parallel(j)
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_split_predicate_parallelized)
+    assert_structural_equal_ignore_global_symbol(
+        s.mod["main"], element_wise_split_predicate_parallelized
+    )
     verify_trace_roundtrip(s, mod=element_wise_split_predicate)
 
 
@@ -514,7 +519,9 @@ def test_vectorize():
     s = tir.Schedule(element_wise_compute_at_split, debug_mask="all")
     _, _, j1i = s.get_loops(s.get_block("C"))
     s.vectorize(j1i)
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_compute_at_split_vectorized)
+    assert_structural_equal_ignore_global_symbol(
+        s.mod["main"], element_wise_compute_at_split_vectorized
+    )
     verify_trace_roundtrip(s, mod=element_wise_compute_at_split)
 
 
@@ -522,7 +529,9 @@ def test_vectorize_predicate():
     s = tir.Schedule(element_wise_split_predicate, debug_mask="all")
     i, _, _ = s.get_loops(s.get_block("B"))
     s.vectorize(i)
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_split_predicate_vectorized)
+    assert_structural_equal_ignore_global_symbol(
+        s.mod["main"], element_wise_split_predicate_vectorized
+    )
     verify_trace_roundtrip(s, mod=element_wise_split_predicate)
 
 
@@ -537,7 +546,7 @@ def test_unroll():
     s = tir.Schedule(rowsum, debug_mask="all")
     i, _ = s.get_loops(s.get_block("B"))
     s.unroll(i)
-    tvm.ir.assert_structural_equal(s.mod["main"], rowsum_unrolled)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], rowsum_unrolled)
     verify_trace_roundtrip(s, mod=rowsum)
 
 
@@ -546,7 +555,7 @@ def test_unroll_after_bind():
     i, _ = s.get_loops(s.get_block("B"))
     s.bind(i, "blockIdx.x")
     s.unroll(i)
-    tvm.ir.assert_structural_equal(s.mod["main"], rowsum_unrolled)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], rowsum_unrolled)
     verify_trace_roundtrip(s, mod=rowsum)
 
 
@@ -554,7 +563,7 @@ def test_bind1():
     s = tir.Schedule(element_wise, debug_mask="all")
     i, _ = s.get_loops(s.get_block("B"))
     s.bind(i, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_i_bound)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], element_wise_i_bound)
     verify_trace_roundtrip(s, mod=element_wise)
 
 
@@ -564,7 +573,9 @@ def test_bind2():
     _, j1o, _ = s.get_loops(s.get_block("C"))
     s.bind(j0, "threadIdx.x")
     s.bind(j1o, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_compute_at_split_j0_j1o_bound)
+    assert_structural_equal_ignore_global_symbol(
+        s.mod["main"], element_wise_compute_at_split_j0_j1o_bound
+    )
     verify_trace_roundtrip(s, mod=element_wise_compute_at_split)
 
 
@@ -572,7 +583,7 @@ def test_bind_cross_thread_reduction():
     s = tir.Schedule(rowsum, debug_mask="all")
     _, k = s.get_loops(s.get_block("B"))
     s.bind(k, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], rowsum_cross_thread_reduction)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], rowsum_cross_thread_reduction)
     verify_trace_roundtrip(s, mod=rowsum)
 
 
@@ -588,7 +599,7 @@ def test_bind_after_bind():
     i, _ = s.get_loops(s.get_block("B"))
     s.bind(i, "blockIdx.x")
     s.bind(i, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], element_wise_i_bound)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], element_wise_i_bound)
     verify_trace_roundtrip(s, mod=element_wise)
 
 
@@ -596,7 +607,7 @@ def test_block_inside_init():
     s = tir.Schedule(block_inside_init, debug_mask="all")
     (i,) = s.get_loops(s.get_block("outer"))
     s.bind(i, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], thread_bound_block_inside_init)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], thread_bound_block_inside_init)
     verify_trace_roundtrip(s, mod=block_inside_init)
 
 
@@ -604,7 +615,7 @@ def test_vectorize_after_decompose():
     s = tir.Schedule(decomposed_gemm, debug_mask="all")
     jj = s.get_loops(s.get_block("C"))[-1]
     s.vectorize(jj)
-    tvm.ir.assert_structural_equal(s.mod["main"], decomposed_gemm_after_vectorize)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], decomposed_gemm_after_vectorize)
     verify_trace_roundtrip(s, mod=decomposed_gemm)
 
 
@@ -616,7 +627,7 @@ def test_nested_block_bind():
     _, l = s.get_loops(block_inner)
     s.bind(l, "threadIdx.x")
     s.bind(j, "blockIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], thread_bound_nested_block)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], thread_bound_nested_block)
     verify_trace_roundtrip(s, mod=nested_block_bind)
 
 
@@ -628,7 +639,9 @@ def test_nexted_block_bind_after_cache_read():
     (j,) = s.get_loops(block_inner)
     s.bind(i, "blockIdx.x")
     s.bind(j, "threadIdx.x")
-    tvm.ir.assert_structural_equal(s.mod["main"], thread_bound_nested_block_after_cache_read)
+    assert_structural_equal_ignore_global_symbol(
+        s.mod["main"], thread_bound_nested_block_after_cache_read
+    )
     verify_trace_roundtrip(s, mod=nested_block_bind_after_cache_read)
 
 
@@ -639,7 +652,7 @@ def test_vectorize_init():
     _, _, ii_0, jj_0 = s.get_loops(init_blk)
     _, _, k_1, ii_1, jj_1 = s.get_loops(upd_blk)
     s.vectorize(jj_0)
-    tvm.ir.assert_structural_equal(s.mod["main"], decomposed_gemm_parallelize_init)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], decomposed_gemm_parallelize_init)
     verify_trace_roundtrip(s, mod=decomposed_gemm)
 
 
@@ -651,7 +664,7 @@ def test_scatter_parallelize():
     (i_1,) = s.get_loops(last)
     s.parallel(i_0)
     s.parallel(i_1)
-    tvm.ir.assert_structural_equal(s.mod["main"], scatter_compute_parallelize)
+    assert_structural_equal_ignore_global_symbol(s.mod["main"], scatter_compute_parallelize)
     verify_trace_roundtrip(s, mod=scatter_compute)
 
 

@@ -42,7 +42,9 @@
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
+#if TVM_LLVM_VERSION < 170
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#endif
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/device_api.h>
@@ -51,7 +53,7 @@
 #include "../../runtime/rocm/rocm_module.h"
 #include "../build_common.h"
 #include "codegen_llvm.h"
-#include "llvm_common.h"
+#include "llvm_instance.h"
 
 namespace tvm {
 namespace codegen {
@@ -85,9 +87,9 @@ class CodeGenAMDGPU : public CodeGenLLVM {
   CodeGenAMDGPU() = default;
   virtual ~CodeGenAMDGPU() = default;
 
-  void AddFunction(const PrimFunc& f) final {
+  void AddFunction(const GlobalVar& gvar, const PrimFunc& f) final {
     // add function as void return value
-    CodeGenLLVM::AddFunctionInternal(f, true);
+    CodeGenLLVM::AddFunctionInternal(gvar, f);
     function_->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
     std::ostringstream attr;
     attr << "1," << DetectROCMmaxThreadsPerBlock();
@@ -185,7 +187,8 @@ class CodeGenAMDGPU : public CodeGenLLVM {
       }
     }
     llvm::Function* f = llvm::Intrinsic::getDeclaration(module_.get(), intrin_id);
-    return builder_->CreateCall(f, {});
+    llvm::Value* result = builder_->CreateCall(f, {});
+    return this->CreateCast(DataType::Int(32), iv->var->dtype, result);
   }
 
   llvm::Value* CreateStorageSync(const CallNode* op) final {
@@ -198,13 +201,15 @@ class CodeGenAMDGPU : public CodeGenLLVM {
       return builder_->CreateCall(f, {});
     } else {
       LOG(FATAL) << "Do not support sync " << sync;
-      return nullptr;
     }
   }
 
+#if TVM_LLVM_VERSION < 160
+  // This function only works with the legacy pass manager.
   void InitPassManagerBuilder(llvm::PassManagerBuilder* builder) final {
     // Additional optimization hook to tweak the builder.
   }
+#endif
 
   unsigned GetGlobalAddressSpace() const final { return 1; }
 
@@ -238,48 +243,37 @@ class CodeGenAMDGPU : public CodeGenLLVM {
   }
 
  protected:
-  void InitTarget(llvm::TargetMachine* tm) final {
+  void InitTarget() final {
     // Maximum vector lane = float4
     native_vector_bits_ = 4 * 32;
-    CodeGenLLVM::InitTarget(tm);
+    CodeGenLLVM::InitTarget();
   }
 };
 
 runtime::Module BuildAMDGPU(IRModule mod, Target target) {
+  LLVMInstance llvm_instance;
+
+  With<LLVMTarget> llvm_target(llvm_instance, target);
 #if TVM_LLVM_VERSION < 90
   LOG(FATAL) << "AMDGPU backend requires at least LLVM 9";
   // Lower versions will crash when loading the bitcode, see
   // issue #4087 for a discussion
 #endif
-  InitializeLLVM();
-  std::unique_ptr<llvm::TargetMachine> tm = GetLLVMTargetMachine(target);
-  std::unique_ptr<llvm::LLVMContext> ctx(new llvm::LLVMContext());
-  // careful: cg will hold a naked pointer reference to ctx, so it should
-  // have a shorter lifetime than the ctx.
-  std::unique_ptr<CodeGenAMDGPU> cg(new CodeGenAMDGPU());
+  auto cg = std::make_unique<CodeGenAMDGPU>();
 
-  cg->Init("TVMAMDGPUModule", tm.get(), ctx.get(), false, false, false);
+  cg->Init("TVMAMDGPUModule", llvm_target.get(), NullOpt, false, false);
 
-  cg->AddFunctionsOrdered(mod->functions.begin(), mod->functions.end(), [](auto& kv) {
-    ICHECK(kv.second->template IsInstance<PrimFuncNode>())
-        << "Can only lower IR Module with PrimFuncs";
-    return Downcast<PrimFunc>(kv.second);
-  });
+  cg->AddFunctionsOrdered(mod->functions.begin(), mod->functions.end());
 
+  llvm::TargetMachine* tm = llvm_target->GetOrCreateTargetMachine();
   const auto* find_rocm_bitcodes = tvm::runtime::Registry::Get("tvm_callback_rocm_bitcode_path");
   Array<runtime::String> bitcode_files = (*find_rocm_bitcodes)();
 
   for (auto& bitcode_path : bitcode_files) {
-    std::string path = bitcode_path;
-    llvm::SMDiagnostic err;
-    std::unique_ptr<llvm::Module> mlib = llvm::parseIRFile(path, err, *ctx);
-    if (mlib.get() == nullptr) {
-      std::string msg(err.getMessage());
-      LOG(FATAL) << "Fail to load bitcode file " << path << "\n"
-                 << "line " << err.getLineNo() << ":" << msg;
-    }
-    mlib->setTargetTriple(tm->getTargetTriple().str());
+    std::unique_ptr<llvm::Module> mlib = llvm_instance.LoadIR(bitcode_path);
+    mlib->setTargetTriple(llvm_target->GetTargetTriple());
     mlib->setDataLayout(tm->createDataLayout());
+
     for (llvm::Function& f : mlib->functions()) {
       f.addFnAttr(llvm::Attribute::AlwaysInline);
     }
@@ -308,9 +302,12 @@ runtime::Module BuildAMDGPU(IRModule mod, Target target) {
 #elif TVM_LLVM_VERSION <= 90
   ICHECK(tm->addPassesToEmitFile(pass, destObj, nullptr, llvm::TargetMachine::CGFT_ObjectFile) == 0)
       << "Cannot emit target CGFT_ObjectFile";
-#else
+#elif TVM_LLVM_VERSION <= 170
   ICHECK(tm->addPassesToEmitFile(pass, destObj, nullptr, llvm::CGFT_ObjectFile) == 0)
       << "Cannot emit target CGFT_ObjectFile";
+#else
+  ICHECK(tm->addPassesToEmitFile(pass, destObj, nullptr, llvm::CodeGenFileType::ObjectFile) == 0)
+      << "Cannot emit target CodeGenFileType::ObjectFile";
 #endif
   pass.run(*mObj);
   std::string obj(dataObj.begin(), dataObj.end());
@@ -323,8 +320,12 @@ runtime::Module BuildAMDGPU(IRModule mod, Target target) {
   ICHECK(tm->addPassesToEmitFile(passAsm, destAsm, nullptr,
                                  llvm::TargetMachine::CGFT_AssemblyFile) == 0)
       << "Cannot emit target CGFT_AssemblyFile";
-#else
+#elif TVM_LLVM_VERSION <= 170
   ICHECK(tm->addPassesToEmitFile(passAsm, destAsm, nullptr, llvm::CGFT_AssemblyFile) == 0)
+      << "Cannot emit target CGFT_AssemblyFile";
+#else
+  ICHECK(tm->addPassesToEmitFile(passAsm, destAsm, nullptr, llvm::CodeGenFileType::AssemblyFile) ==
+         0)
       << "Cannot emit target CGFT_AssemblyFile";
 #endif
   passAsm.run(*mAsm);
@@ -351,4 +352,5 @@ TVM_REGISTER_GLOBAL("tvm.codegen.llvm.target_rocm")
 
 }  // namespace codegen
 }  // namespace tvm
+
 #endif  // TVM_LLVM_VERSION

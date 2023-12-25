@@ -19,20 +19,23 @@ import pytest
 import tvm
 from tvm import tir
 from tvm.script import tir as T
-from tvm.tir.schedule.testing import verify_trace_roundtrip
+from tvm.tir.schedule.testing import (
+    assert_structural_equal_ignore_global_symbol,
+    verify_trace_roundtrip,
+)
 
 # fmt: off
 # pylint: disable=no-member,invalid-name,unused-variable,line-too-long,redefined-outer-name
 
 @T.prim_func
 def element_wise(a: T.handle, c: T.handle) -> None:
-    C = T.match_buffer(c, [128, 128], elem_offset=0, align=128, offset_factor=1)
-    A = T.match_buffer(a, [128, 128], elem_offset=0, align=128, offset_factor=1)
+    C = T.match_buffer(c, [128, 128], elem_offset=0, align=64, offset_factor=1)
+    A = T.match_buffer(a, [128, 128], elem_offset=0, align=64, offset_factor=1)
     # body
     with T.block("root"):
         T.reads([])
         T.writes([])
-        B = T.alloc_buffer([128, 128], elem_offset=0, align=128, offset_factor=1)
+        B = T.alloc_buffer([128, 128], elem_offset=0, align=64, offset_factor=1)
         for i0 in T.serial(0, 128):
             for ax1 in T.serial(0, 128):
                 with T.block("B"):
@@ -50,13 +53,13 @@ def element_wise(a: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def element_wise_storage_align(a: T.handle, c: T.handle) -> None:
-    C = T.match_buffer(c, [128, 128], elem_offset=0, align=128, offset_factor=1)
-    A = T.match_buffer(a, [128, 128], elem_offset=0, align=128, offset_factor=1)
+    C = T.match_buffer(c, [128, 128], elem_offset=0, align=64, offset_factor=1)
+    A = T.match_buffer(a, [128, 128], elem_offset=0, align=64, offset_factor=1)
     # body
     with T.block("root"):
         T.reads([])
         T.writes([])
-        B = T.alloc_buffer([128, 128], elem_offset=0, align=128, offset_factor=1)
+        B = T.alloc_buffer([128, 128], elem_offset=0, align=64, offset_factor=1)
         for i0 in T.serial(0, 128):
             for ax1 in T.serial(0, 128):
                 with T.block("B"):
@@ -75,13 +78,13 @@ def element_wise_storage_align(a: T.handle, c: T.handle) -> None:
 
 @T.prim_func
 def element_wise_invalid_annotation(a: T.handle, c: T.handle) -> None:
-    C = T.match_buffer(c, [128, 128], elem_offset=0, align=128, offset_factor=1)
-    A = T.match_buffer(a, [128, 128], elem_offset=0, align=128, offset_factor=1)
+    C = T.match_buffer(c, [128, 128], elem_offset=0, align=64, offset_factor=1)
+    A = T.match_buffer(a, [128, 128], elem_offset=0, align=64, offset_factor=1)
     # body
     with T.block("root"):
         T.reads([])
         T.writes([])
-        B = T.alloc_buffer([128, 128], elem_offset=0, align=128, offset_factor=1)
+        B = T.alloc_buffer([128, 128], elem_offset=0, align=64, offset_factor=1)
         for i0 in T.serial(0, 128):
             for ax1 in T.serial(0, 128):
                 with T.block("B"):
@@ -105,7 +108,7 @@ def test_storage_align(use_block_name):
     s = tir.Schedule(func, debug_mask='all')
     B = 'B' if use_block_name else s.get_block("B")
     s.storage_align(B, 0, axis=0, factor=128, offset=127)
-    tvm.ir.assert_structural_equal(element_wise_storage_align, s.mod["main"])
+    assert_structural_equal_ignore_global_symbol(element_wise_storage_align, s.mod["main"])
     verify_trace_roundtrip(sch=s, mod=func)
 
 
@@ -115,7 +118,7 @@ def test_storage_align_update():
     B = s.get_block("B")
     s.storage_align(B, 0, axis=0, factor=128, offset=0)
     s.storage_align(B, 0, axis=0, factor=128, offset=127)
-    tvm.ir.assert_structural_equal(element_wise_storage_align, s.mod["main"])
+    assert_structural_equal_ignore_global_symbol(element_wise_storage_align, s.mod["main"])
     verify_trace_roundtrip(sch=s, mod=func)
 
 

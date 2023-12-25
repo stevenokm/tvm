@@ -24,9 +24,9 @@ from tvm.tir.function import PrimFunc
 
 def _check(before, expect):
     if isinstance(before, PrimFunc):
-        before = IRModule({"main": before})
+        before = IRModule({"main": before.with_attr("global_symbol", "main")})
     if isinstance(expect, PrimFunc):
-        expect = IRModule({"main": expect})
+        expect = IRModule({"main": expect.with_attr("global_symbol", "main")})
 
     mod = tvm.tir.transform.RemoveWeightLayoutRewriteBlock()(before)
     tvm.ir.assert_structural_equal(mod, expect)
@@ -35,9 +35,9 @@ def _check(before, expect):
 def test_matmul():
     @T.prim_func
     def before(
-        A: T.Buffer[(16, 16), "float32"],
-        B: T.Buffer[(16, 16), "float32"],
-        C: T.Buffer[(16, 16), "float32"],
+        A: T.Buffer((16, 16), "float32"),
+        B: T.Buffer((16, 16), "float32"),
+        C: T.Buffer((16, 16), "float32"),
     ) -> None:
         T.func_attr({"layout_free_buffers": [1]})
         B_ = T.alloc_buffer([16, 4, 4], dtype="float32")
@@ -61,9 +61,9 @@ def test_matmul():
 
     @T.prim_func
     def after(
-        A: T.Buffer[(16, 16), "float32"],
-        B: T.Buffer[(16, 4, 4), "float32"],
-        C: T.Buffer[(16, 16), "float32"],
+        A: T.Buffer((16, 16), "float32"),
+        B: T.Buffer((16, 4, 4), "float32"),
+        C: T.Buffer((16, 16), "float32"),
     ) -> None:
         T.func_attr({"layout_free_buffers": [1]})
         for i0_o, i1_o in T.grid(16, 16):
