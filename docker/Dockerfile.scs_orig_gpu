@@ -1,0 +1,4 @@
+FROM tvm.demo_gpu:sclab
+
+# install SCS_orig dependencies
+RUN pip3 install easydict

@@ -195,6 +195,11 @@ while (( $# )); do
             shift 2
             ;;
 
+        --cpuset-cpus)
+            DOCKER_FLAGS+=(--cpuset-cpus "$2")
+            shift 2
+            ;;
+
         --net=host)
             USE_NET_HOST=true
             shift
@@ -315,8 +320,7 @@ fi
 
 source "$(dirname $0)/dev_common.sh" || exit 2
 
-DOCKER_FLAGS=( --privileged --shm-size=16gb )
-DOCKER_MOUNT=( --volume "/ssd1:/ssd1" )
+DOCKER_FLAGS+=( --shm-size=16gb )
 DOCKER_DEVICES=( )
 # If the user gave a shortcut defined in the Jenkinsfile, use it.
 EXPANDED_SHORTCUT=$(lookup_image_spec "${DOCKER_IMAGE_NAME}")
