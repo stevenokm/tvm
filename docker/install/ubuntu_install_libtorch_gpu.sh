@@ -21,7 +21,7 @@ set -u
 set -o pipefail
 
 pushd /usr/local/
-wget -q https://download.pytorch.org/libtorch/lts/1.8/cu102/libtorch-cxx11-abi-shared-with-deps-1.8.2%2Bcu102.zip
-unzip libtorch-cxx11-abi-shared-with-deps-1.8.2+cu102.zip
+wget -q https://download.pytorch.org/libtorch/cu118/libtorch-cxx11-abi-shared-with-deps-2.0.0%2Bcu118.zip
+unzip libtorch-cxx11-abi-shared-with-deps-2.0.0+cu118.zip
 # now it is in /usr/local/libtorch
 popd
